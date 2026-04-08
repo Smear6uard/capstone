@@ -89,7 +89,6 @@ def test_call_together_json_returns_validated_model(
         main.call_together_json(
             messages=[{"role": "user", "content": "Hello"}],
             response_model=DemoResponse,
-            schema_name="demo_response",
             temperature=0.3,
         )
     )
@@ -98,7 +97,16 @@ def test_call_together_json_returns_validated_model(
     url, headers, payload = client.calls[0]
     assert url == main.TOGETHER_API_URL
     assert headers["Authorization"] == "Bearer test-key"
-    assert payload["response_format"]["json_schema"]["name"] == "demo_response"
+    # Together wants the flat {"type": "json_schema", "schema": ...} form,
+    # and we strip constraint keywords so the grammar compiler stays fast.
+    response_format = payload["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert "json_schema" not in response_format
+    sent_schema = response_format["schema"]
+    assert sent_schema["type"] == "object"
+    assert sent_schema["properties"]["value"] == {"type": "string"}
+    assert "title" not in sent_schema
+    assert "$defs" not in sent_schema
 
 
 def test_call_together_json_maps_http_status_errors(
@@ -122,7 +130,6 @@ def test_call_together_json_maps_http_status_errors(
             main.call_together_json(
                 messages=[{"role": "user", "content": "Hello"}],
                 response_model=DemoResponse,
-                schema_name="demo_response",
             )
         )
 
@@ -145,13 +152,34 @@ def test_call_together_json_maps_network_errors(
             main.call_together_json(
                 messages=[{"role": "user", "content": "Hello"}],
                 response_model=DemoResponse,
-                schema_name="demo_response",
             )
         )
 
-    assert client.calls
+    assert len(client.calls) == 2
     assert exc_info.value.status_code == 502
-    assert exc_info.value.detail == "Failed to reach Together API."
+    assert "Failed to reach Together API" in exc_info.value.detail
+    assert "ConnectError" in exc_info.value.detail
+
+
+def test_call_together_json_maps_timeout_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = patch_async_client(
+        monkeypatch,
+        FakeAsyncClient(post_error=httpx.ReadTimeout("timed out")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            main.call_together_json(
+                messages=[{"role": "user", "content": "Hello"}],
+                response_model=DemoResponse,
+            )
+        )
+
+    assert len(client.calls) == 2
+    assert exc_info.value.status_code == 504
+    assert "request timed out" in exc_info.value.detail
 
 
 def test_call_together_json_rejects_invalid_http_json(
@@ -167,7 +195,6 @@ def test_call_together_json_rejects_invalid_http_json(
             main.call_together_json(
                 messages=[{"role": "user", "content": "Hello"}],
                 response_model=DemoResponse,
-                schema_name="demo_response",
             )
         )
 
@@ -201,7 +228,6 @@ def test_call_together_json_rejects_schema_mismatch(
             main.call_together_json(
                 messages=[{"role": "user", "content": "Hello"}],
                 response_model=DemoResponse,
-                schema_name="demo_response",
             )
         )
 

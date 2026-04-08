@@ -27,7 +27,6 @@ def test_generate_question_rejects_blank_domain() -> None:
 
 def test_generate_question_returns_model_response(monkeypatch) -> None:
     async def fake_call_together_json(**kwargs):
-        assert kwargs["schema_name"] == "generated_question"
         assert kwargs["response_model"] is main.GenerateQuestionResponse
         assert "Domain: Roman History" in kwargs["messages"][1]["content"]
         return main.GenerateQuestionResponse(
@@ -49,7 +48,6 @@ def test_generate_question_returns_model_response(monkeypatch) -> None:
 
 def test_grade_answer_returns_model_response(monkeypatch) -> None:
     async def fake_call_together_json(**kwargs):
-        assert kwargs["schema_name"] == "graded_answer"
         assert kwargs["response_model"] is main.GradeAnswerResponse
         assert "1. Uses supporting evidence" in kwargs["messages"][1]["content"]
         assert "Time spent (seconds): 780.0" in kwargs["messages"][1]["content"]
@@ -124,7 +122,7 @@ def test_grade_answer_rejects_wrong_number_of_criteria(monkeypatch) -> None:
     assert "wrong number of items" in response.json()["detail"]
 
 
-def test_grade_answer_rejects_wrong_criterion_names(monkeypatch) -> None:
+def test_grade_answer_accepts_paraphrased_criterion_names(monkeypatch) -> None:
     async def fake_call_together_json(**kwargs):
         return main.GradeAnswerResponse(
             criterion_scores=[
@@ -159,5 +157,52 @@ def test_grade_answer_rejects_wrong_criterion_names(monkeypatch) -> None:
         },
     )
 
-    assert response.status_code == 502
-    assert "criterion names that did not match" in response.json()["detail"]
+    assert response.status_code == 200
+    payload = response.json()
+    assert [score["criterion"] for score in payload["criterion_scores"]] == [
+        "Uses supporting evidence",
+        "Explains multiple causes",
+    ]
+
+
+def test_grade_answer_accepts_reordered_numbered_criteria(monkeypatch) -> None:
+    async def fake_call_together_json(**kwargs):
+        return main.GradeAnswerResponse(
+            criterion_scores=[
+                main.CriterionScore(
+                    criterion="2) explains multiple causes",
+                    score=82,
+                    feedback="Covers political and economic factors.",
+                ),
+                main.CriterionScore(
+                    criterion="1. Uses supporting evidence",
+                    score=88,
+                    feedback="References relevant historical context.",
+                ),
+            ],
+            overall_score=85,
+            grading_explanation="Solid response with good support and scope.",
+        )
+
+    monkeypatch.setattr(main, "call_together_json", fake_call_together_json)
+
+    response = client.post(
+        "/api/grade-answer",
+        json={
+            "question": "Explain the causes of Rome's fall.",
+            "grading_rubric": [
+                "Uses supporting evidence",
+                "Explains multiple causes",
+            ],
+            "background_info": "Students studied late antiquity.",
+            "student_answer": "Rome weakened because of leadership instability, economics, and invasions.",
+            "time_spent_seconds": 780,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [score["criterion"] for score in payload["criterion_scores"]] == [
+        "Uses supporting evidence",
+        "Explains multiple causes",
+    ]

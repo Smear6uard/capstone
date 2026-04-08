@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Literal, TypeVar
 
 import httpx
@@ -118,6 +119,60 @@ def build_prompt_schema(model: type[BaseModel]) -> str:
     return json.dumps(model.model_json_schema(), indent=2)
 
 
+# Keywords we strip when sending a schema to Together. Together's grammar
+# compiler is very slow (60-90s) when the schema contains constraint
+# keywords, and it doesn't support $ref/$defs well. Pydantic validates the
+# response on the way back, so we don't need Together to enforce these.
+_SCHEMA_KEYWORDS_TO_STRIP = frozenset(
+    {
+        "$defs",
+        "title",
+        "description",
+        "default",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minItems",
+        "maxItems",
+        "pattern",
+        "format",
+    }
+)
+
+
+def simplify_schema_for_together(schema: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a Pydantic-generated JSON schema into a Together-friendly form.
+
+    Inlines $ref/$defs and drops constraint keywords so Together's grammar
+    compilation stays fast. Without this, a nested response model with
+    constraints can push a single call past 90 seconds.
+    """
+    defs = schema.get("$defs", {})
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                ref = node["$ref"]
+                name = ref.rsplit("/", 1)[-1]
+                target = defs.get(name)
+                if target is None:
+                    return {}
+                return walk(target)
+            return {
+                key: walk(value)
+                for key, value in node.items()
+                if key not in _SCHEMA_KEYWORDS_TO_STRIP
+            }
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    return walk(schema)
+
+
 def parse_llm_content(raw_content: str) -> dict[str, Any]:
     content = raw_content.strip()
     if content.startswith("```"):
@@ -137,6 +192,14 @@ def parse_llm_content(raw_content: str) -> dict[str, Any]:
     return parsed
 
 
+def normalize_criterion_name(value: str) -> str:
+    normalized = value.strip().lower()
+    # Drop common list prefixes like "1. ", "2) ", or "criterion 1: ".
+    normalized = re.sub(r"^(?:criterion\s*\d+\s*[:\-.)]\s*|\d+\s*[:\-.)]\s*)", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
 def extract_together_content(data: dict[str, Any]) -> str:
     try:
         return data["choices"][0]["message"]["content"]
@@ -151,7 +214,6 @@ async def call_together_json(
     *,
     messages: list[dict[str, str]],
     response_model: type[ResponseModelT],
-    schema_name: str,
     temperature: float = 0.7,
 ) -> ResponseModelT:
     api_key = get_together_api_key()
@@ -160,10 +222,9 @@ async def call_together_json(
         "messages": messages,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "schema": response_model.model_json_schema(),
-            },
+            "schema": simplify_schema_for_together(
+                response_model.model_json_schema()
+            ),
         },
         "temperature": temperature,
     }
@@ -173,25 +234,40 @@ async def call_together_json(
     }
 
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(45.0, connect=10.0)
+        timeout=httpx.Timeout(120.0, connect=10.0)
     ) as client:
-        try:
-            response = await client.post(
-                TOGETHER_API_URL,
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Together API returned an error: {exc.response.text}",
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail="Failed to reach Together API.",
-            ) from exc
+        for attempt in range(2):
+            try:
+                response = await client.post(
+                    TOGETHER_API_URL,
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                break
+            except httpx.TimeoutException as exc:
+                if attempt == 1:
+                    raise HTTPException(
+                        status_code=504,
+                        detail=(
+                            "Together API request timed out. "
+                            "Try submitting again."
+                        ),
+                    ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Together API returned an error: {exc.response.text}",
+                ) from exc
+            except httpx.HTTPError as exc:
+                if attempt == 1:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            "Failed to reach Together API "
+                            f"({exc.__class__.__name__})."
+                        ),
+                    ) from exc
 
     try:
         data = response.json()
@@ -243,7 +319,6 @@ async def generate_question(
             },
         ],
         response_model=GenerateQuestionResponse,
-        schema_name="generated_question",
         temperature=0.7,
     )
 
@@ -291,7 +366,6 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
             },
         ],
         response_model=GradeAnswerResponse,
-        schema_name="graded_answer",
         temperature=0.2,
     )
 
@@ -304,17 +378,35 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
             ),
         )
 
-    returned_criteria = [
-        criterion_score.criterion.strip()
-        for criterion_score in graded_response.criterion_scores
-    ]
-    if returned_criteria != request.grading_rubric:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Together API returned criterion names that did not match the "
-                "requested grading_rubric."
-            ),
+    returned_by_name: dict[str, list[CriterionScore]] = {}
+    for criterion_score in graded_response.criterion_scores:
+        key = normalize_criterion_name(criterion_score.criterion)
+        returned_by_name.setdefault(key, []).append(criterion_score)
+
+    aligned_scores: list[CriterionScore] = []
+    unused_scores: list[CriterionScore] = list(graded_response.criterion_scores)
+
+    for criterion in request.grading_rubric:
+        key = normalize_criterion_name(criterion)
+        matches = returned_by_name.get(key, [])
+
+        # If the model paraphrases criterion names, preserve usability by
+        # falling back to remaining scores in order.
+        if matches:
+            matched_score = matches.pop(0)
+            unused_scores.remove(matched_score)
+        else:
+            matched_score = unused_scores.pop(0)
+        aligned_scores.append(
+            CriterionScore(
+                criterion=criterion,
+                score=matched_score.score,
+                feedback=matched_score.feedback,
+            )
         )
 
-    return graded_response
+    return GradeAnswerResponse(
+        criterion_scores=aligned_scores,
+        overall_score=graded_response.overall_score,
+        grading_explanation=graded_response.grading_explanation,
+    )
