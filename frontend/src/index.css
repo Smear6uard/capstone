@@ -1,1 +1,396 @@
 @import "tailwindcss";
+
+@theme {
+  --color-ivory: #f3ecdf;
+  --color-ivory-deep: #ece2cf;
+  --color-ink: #14100b;
+  --color-ink-soft: #3a2f24;
+  --color-oxblood: #8a1c1c;
+  --color-oxblood-deep: #5a0f0f;
+  --color-stamp: #b9321c;
+  --color-ruled: rgba(20, 16, 11, 0.08);
+  --color-rule-strong: rgba(20, 16, 11, 0.22);
+
+  --font-display: "Instrument Serif", "Fraunces", Georgia, serif;
+  --font-serif: "Newsreader", "Fraunces", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: light;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-serif);
+  color: var(--color-ink);
+  background: var(--color-ivory);
+  font-feature-settings: "ss01", "ss02", "liga";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Page backdrop: ruled paper + warm vignette */
+.page-surface {
+  background:
+    radial-gradient(circle at 85% 10%, rgba(185, 50, 28, 0.06) 0%, transparent 40%),
+    radial-gradient(circle at 5% 95%, rgba(20, 16, 11, 0.05) 0%, transparent 40%),
+    linear-gradient(180deg, #f4ede0 0%, #ece2cf 100%);
+  position: relative;
+}
+
+.page-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    180deg,
+    transparent 0,
+    transparent 31px,
+    rgba(20, 16, 11, 0.055) 31px,
+    rgba(20, 16, 11, 0.055) 32px
+  );
+  mix-blend-mode: multiply;
+  opacity: 0.55;
+}
+
+.page-surface::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 30%, rgba(0, 0, 0, 0.03), transparent 60%),
+    radial-gradient(circle at 80% 80%, rgba(0, 0, 0, 0.02), transparent 60%);
+}
+
+/* Ink divider with ornamental dot */
+.rule-ink {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.rule-ink::before,
+.rule-ink::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-ink);
+  opacity: 0.45;
+}
+
+/* Red CERTIFIED stamp */
+.stamp {
+  --stamp-rotate: -9deg;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 2px solid var(--color-stamp);
+  color: var(--color-stamp);
+  padding: 0.35rem 0.9rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  border-radius: 2px;
+  transform: rotate(var(--stamp-rotate));
+  background: rgba(185, 50, 28, 0.06);
+  box-shadow: 0 0 0 1px rgba(185, 50, 28, 0.2) inset;
+  position: relative;
+}
+.stamp::before {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border: 1px dashed rgba(185, 50, 28, 0.4);
+  pointer-events: none;
+}
+
+.stamp-dot {
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--color-stamp);
+}
+
+/* Paper card: cream sheet on the ruled page */
+.paper {
+  background: #fbf6ea;
+  border: 1px solid rgba(20, 16, 11, 0.18);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.5) inset,
+    0 14px 30px -16px rgba(20, 16, 11, 0.18),
+    0 2px 0 rgba(20, 16, 11, 0.05);
+  position: relative;
+}
+.paper-margin {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0,
+    transparent 48px,
+    rgba(138, 28, 28, 0.5) 48px,
+    rgba(138, 28, 28, 0.5) 49px,
+    transparent 49px
+  );
+}
+
+/* Chunky button */
+.btn-primary {
+  background: var(--color-ink);
+  color: var(--color-ivory);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.95rem 1.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  border: 1px solid var(--color-ink);
+  box-shadow: 4px 4px 0 0 var(--color-oxblood);
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+  cursor: pointer;
+}
+.btn-primary:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 0 var(--color-oxblood);
+  background: #241c12;
+}
+.btn-primary:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 0 var(--color-oxblood);
+}
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: 2px 2px 0 0 rgba(138, 28, 28, 0.5);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--color-ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: background 150ms ease, color 150ms ease;
+  cursor: pointer;
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--color-ink);
+  color: var(--color-ivory);
+}
+
+.input-field {
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid var(--color-ink);
+  font-family: var(--font-serif);
+  font-size: 1.05rem;
+  padding: 0.5rem 0.1rem 0.45rem;
+  color: var(--color-ink);
+  transition: border-color 150ms ease;
+}
+.input-field:focus {
+  outline: none;
+  border-bottom-color: var(--color-oxblood);
+}
+.input-field::placeholder {
+  color: rgba(20, 16, 11, 0.35);
+  font-style: italic;
+}
+
+textarea.input-field {
+  border: 1.5px solid var(--color-ink);
+  padding: 1rem 1.2rem;
+  background-image: repeating-linear-gradient(
+    180deg,
+    transparent 0,
+    transparent 27px,
+    rgba(20, 16, 11, 0.1) 27px,
+    rgba(20, 16, 11, 0.1) 28px
+  );
+  line-height: 28px;
+  resize: vertical;
+}
+textarea.input-field:focus {
+  border-color: var(--color-oxblood);
+}
+
+.field-label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--color-ink-soft);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.65rem;
+  background: rgba(20, 16, 11, 0.06);
+  border: 1px solid var(--color-ink);
+  color: var(--color-ink);
+}
+.chip-remove {
+  cursor: pointer;
+  opacity: 0.6;
+  font-weight: 700;
+}
+.chip-remove:hover {
+  opacity: 1;
+  color: var(--color-oxblood);
+}
+
+.marquee {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+}
+
+/* Animated entrance */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes ink-bleed {
+  0% {
+    opacity: 0;
+    letter-spacing: 0.05em;
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    letter-spacing: 0;
+    filter: blur(0);
+  }
+}
+.rise {
+  animation: rise 700ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.ink-bleed {
+  animation: ink-bleed 900ms ease-out both;
+}
+.delay-1 { animation-delay: 80ms; }
+.delay-2 { animation-delay: 160ms; }
+.delay-3 { animation-delay: 240ms; }
+.delay-4 { animation-delay: 320ms; }
+.delay-5 { animation-delay: 420ms; }
+
+/* Score bar */
+.score-track {
+  position: relative;
+  height: 8px;
+  background: rgba(20, 16, 11, 0.12);
+  overflow: hidden;
+}
+.score-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--color-oxblood) 0 6px,
+    var(--color-oxblood-deep) 6px 12px
+  );
+  transition: width 800ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* Two big landing cards */
+.door {
+  position: relative;
+  background: #fbf6ea;
+  border: 2px solid var(--color-ink);
+  padding: 3rem 2.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+  cursor: pointer;
+  transition: transform 220ms ease, box-shadow 220ms ease, background 220ms ease;
+  text-align: left;
+  overflow: hidden;
+}
+.door::before {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border: 1px solid rgba(20, 16, 11, 0.35);
+  pointer-events: none;
+}
+.door::after {
+  content: "";
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 120px;
+  height: 120px;
+  background: radial-gradient(circle at center, rgba(185, 50, 28, 0.14), transparent 70%);
+  pointer-events: none;
+}
+.door:hover {
+  transform: translate(-4px, -4px);
+  box-shadow: 10px 10px 0 0 var(--color-oxblood);
+  background: #fff9ee;
+}
+.door-number {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.25em;
+  color: var(--color-oxblood);
+}
+.door-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(2.2rem, 4.5vw, 3.4rem);
+  line-height: 0.95;
+  letter-spacing: -0.01em;
+}
+.door-body {
+  font-family: var(--font-serif);
+  font-size: 1rem;
+  line-height: 1.55;
+  color: var(--color-ink-soft);
+}
+
+/* Numbered Q marker */
+.q-marker {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.25em;
+  color: var(--color-oxblood);
+  text-transform: uppercase;
+}
+
+.serif-italic {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+}
