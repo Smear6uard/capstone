@@ -4,6 +4,7 @@ import json
 import os
 import re
 import uuid
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional, TypeVar
 
@@ -20,6 +21,8 @@ TOGETHER_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
 Difficulty = Literal["easy", "medium", "hard"]
+GradeLevel = Literal["Middle School", "High School", "Undergraduate", "Graduate"]
+GradingPersonality = Literal["Strict", "Balanced", "Encouraging"]
 
 
 # ── Difficulty guidance (shared by generation + grading) ─────────────────────
@@ -63,6 +66,67 @@ DIFFICULTY_GRADING_STRICTNESS: dict[str, str] = {
     ),
 }
 
+GRADE_LEVEL_QUESTION_STYLE: dict[str, str] = {
+    "Middle School": (
+        "Use accessible vocabulary, familiar examples, and a short essay "
+        "prompt that asks for clear explanation before analysis. Avoid "
+        "specialized jargon unless it is defined in the prompt."
+    ),
+    "High School": (
+        "Use age-appropriate academic vocabulary and ask for a structured "
+        "paragraph or short essay with evidence. Expect reasoning beyond "
+        "recall, but do not require disciplinary methods or specialist "
+        "sources."
+    ),
+    "Undergraduate": (
+        "Use college-level vocabulary and ask for a developed analytical "
+        "essay. Expect accurate concepts, evidence, and clear reasoning."
+    ),
+    "Graduate": (
+        "Use advanced disciplinary vocabulary and ask for a sophisticated "
+        "argument that can address assumptions, methods, evidence quality, "
+        "and competing interpretations."
+    ),
+}
+
+GRADE_LEVEL_GRADING_EXPECTATIONS: dict[str, str] = {
+    "Middle School": (
+        "Evaluate for accurate core understanding, organization, and use of "
+        "simple supporting details. Do not penalize the student for lacking "
+        "advanced vocabulary or formal citation practices."
+    ),
+    "High School": (
+        "Evaluate for a clear claim, relevant evidence, and explanation. Do "
+        "not require primary-source citation, specialist terminology, or "
+        "graduate-level nuance unless the question explicitly asks for it."
+    ),
+    "Undergraduate": (
+        "Evaluate for conceptual accuracy, analysis, evidence, and a coherent "
+        "argument. Expect some nuance, but keep standards aligned with a "
+        "college course rather than expert research."
+    ),
+    "Graduate": (
+        "Evaluate for advanced command of the field, methodological awareness, "
+        "specific evidence, synthesis, and engagement with competing views."
+    ),
+}
+
+GRADING_PERSONALITY_GUIDANCE: dict[str, str] = {
+    "Strict": (
+        "Use high standards and detailed critique. Scores should skew lower "
+        "when the answer is vague, unsupported, incomplete, or imprecise."
+    ),
+    "Balanced": (
+        "Use fair, thorough grading. Weigh strengths and weaknesses evenly "
+        "and keep scores calibrated to the rubric."
+    ),
+    "Encouraging": (
+        "Use a constructive tone that foregrounds what the student did well. "
+        "Be gentler on minor mistakes and allow scores to skew slightly "
+        "higher when the core reasoning is sound."
+    ),
+}
+
 
 # ── Request / response models ────────────────────────────────────────────────
 
@@ -76,6 +140,9 @@ class ConfigureExamRequest(BaseModel):
     topics: list[str] = Field(default_factory=list, max_length=20)
     num_questions: int = Field(ge=1, le=10)
     difficulty: Difficulty
+    grade_level: GradeLevel = "Undergraduate"
+    grading_personality: GradingPersonality = "Balanced"
+    teacher_name: str = Field(default="", max_length=120)
     special_instructions: str = Field(default="", max_length=2000)
 
     @field_validator("domain")
@@ -96,6 +163,11 @@ class ConfigureExamRequest(BaseModel):
                 cleaned.append(stripped)
         return cleaned
 
+    @field_validator("teacher_name")
+    @classmethod
+    def _clean_teacher_name(cls, value: str) -> str:
+        return value.strip()
+
 
 class ConfigureExamResponse(BaseModel):
     config_id: str
@@ -103,6 +175,9 @@ class ConfigureExamResponse(BaseModel):
     topics: list[str]
     num_questions: int
     difficulty: Difficulty
+    grade_level: GradeLevel
+    grading_personality: GradingPersonality
+    teacher_name: str
     special_instructions: str
     created_at: str
 
@@ -111,6 +186,9 @@ class StartExamRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=200)
     num_questions: int = Field(ge=1, le=10)
     difficulty: Difficulty
+    grade_level: GradeLevel = "Undergraduate"
+    grading_personality: GradingPersonality = "Balanced"
+    teacher_name: str = Field(default="", max_length=120)
     topics: list[str] = Field(default_factory=list, max_length=20)
     student_name: str = Field(default="Anonymous Student", max_length=120)
     config_id: Optional[str] = None
@@ -133,12 +211,20 @@ class StartExamRequest(BaseModel):
                 cleaned.append(stripped)
         return cleaned
 
+    @field_validator("teacher_name")
+    @classmethod
+    def _clean_teacher_name(cls, value: str) -> str:
+        return value.strip()
+
 
 class StartExamResponse(BaseModel):
     session_id: str
     student_name: str
     domain: str
     difficulty: Difficulty
+    grade_level: GradeLevel
+    grading_personality: GradingPersonality
+    teacher_name: str
     num_questions: int
 
 
@@ -196,6 +282,33 @@ class GradeAnswerResponse(BaseModel):
     question_index: int = Field(ge=0)
 
 
+class GradeDisputeRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    question_index: int = Field(ge=0)
+    dispute_argument: str = Field(min_length=1, max_length=5000)
+
+    @field_validator("dispute_argument")
+    @classmethod
+    def _clean_dispute_argument(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("dispute_argument must not be empty")
+        return cleaned
+
+
+class LLMGradeDisputeDecision(BaseModel):
+    dispute_accepted: bool
+    revised_score: int = Field(ge=0, le=100)
+    reviewer_explanation: str = Field(min_length=1)
+
+
+class GradeDisputeResponse(BaseModel):
+    dispute_accepted: bool
+    original_score: int = Field(ge=0, le=100)
+    revised_score: int = Field(ge=0, le=100)
+    reviewer_explanation: str = Field(min_length=1)
+
+
 class FinishExamRequest(BaseModel):
     session_id: str = Field(min_length=1)
 
@@ -211,6 +324,7 @@ class QuestionReport(BaseModel):
     overall_score: int
     grading_explanation: str
     time_spent_seconds: float
+    dispute_result: Optional[GradeDisputeResponse] = None
 
 
 class FinishExamResponse(BaseModel):
@@ -218,6 +332,9 @@ class FinishExamResponse(BaseModel):
     student_name: str
     domain: str
     difficulty: Difficulty
+    grade_level: GradeLevel
+    grading_personality: GradingPersonality
+    teacher_name: str
     num_questions: int
     questions: list[QuestionReport]
     composite_score: int
@@ -233,6 +350,77 @@ class LLMComposite(BaseModel):
 
 class ExamResultsResponse(BaseModel):
     exams: list[FinishExamResponse]
+
+
+class ScoreDistributionBucket(BaseModel):
+    label: str
+    min_score: int
+    max_score: int
+    count: int
+
+
+class PerQuestionAnalytics(BaseModel):
+    question_index: int
+    attempts: int
+    average_score: float
+    average_time_seconds: float
+    topics: list[str]
+
+
+class DisputedQuestionAnalytics(BaseModel):
+    question_index: int
+    topic: str
+    question: str
+    dispute_count: int
+    accepted_disputes: int
+    average_original_score: float
+
+
+class AnalyticsSession(BaseModel):
+    session_id: str
+    student_name: str
+    domain: str
+    completed_at: str
+    num_questions: int
+    composite_score: int
+    dispute_count: int
+
+
+class ExamAnalyticsResponse(BaseModel):
+    completed_sessions: int
+    overall_average_score: float
+    average_time_per_question: float
+    score_distribution: list[ScoreDistributionBucket]
+    per_question_average_scores: list[PerQuestionAnalytics]
+    most_disputed_questions: list[DisputedQuestionAnalytics]
+    sessions: list[AnalyticsSession]
+
+
+class TutorSessionRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    question_index: int = Field(ge=0)
+    message: str = Field(default="", max_length=5000)
+
+    @field_validator("message")
+    @classmethod
+    def _clean_message(cls, value: str) -> str:
+        return value.strip()
+
+
+class TutorMessage(BaseModel):
+    role: Literal["student", "tutor"]
+    content: str = Field(min_length=1)
+    created_at: str
+
+
+class LLMTutorTurn(BaseModel):
+    message: str = Field(min_length=1)
+
+
+class TutorSessionResponse(BaseModel):
+    session_id: str
+    question_index: int
+    messages: list[TutorMessage]
 
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -460,6 +648,65 @@ def _require_session(session_id: str) -> dict[str, Any]:
     return session
 
 
+def _feedback_label(teacher_name: str) -> str:
+    cleaned = teacher_name.strip()
+    return f"{cleaned}'s feedback:" if cleaned else "Feedback:"
+
+
+def _ensure_named_feedback(text: str, teacher_name: str) -> str:
+    cleaned = text.strip()
+    if not teacher_name.strip():
+        return cleaned
+
+    label = _feedback_label(teacher_name)
+    if cleaned.lower().startswith(label.lower()):
+        return cleaned
+    return f"{label} {cleaned}"
+
+
+def _find_completed_exam(session_id: str) -> dict[str, Any] | None:
+    for exam in _completed_exams:
+        if exam.get("session_id") == session_id:
+            return exam
+    return None
+
+
+def _clamp_score(value: float) -> int:
+    return max(0, min(100, round(value)))
+
+
+def _effective_question_score(question: dict[str, Any]) -> int:
+    dispute = question.get("dispute_result")
+    if dispute and dispute.get("dispute_accepted"):
+        return int(dispute["revised_score"])
+    return int(question["overall_score"])
+
+
+def _effective_composite_score(exam: dict[str, Any]) -> int:
+    questions = exam.get("questions", [])
+    if not questions:
+        return int(exam.get("composite_score", 0))
+
+    accepted_delta = 0
+    has_accepted_dispute = False
+    for question in questions:
+        dispute = question.get("dispute_result")
+        if dispute and dispute.get("dispute_accepted"):
+            has_accepted_dispute = True
+            accepted_delta += int(dispute["revised_score"]) - int(
+                dispute["original_score"]
+            )
+
+    original = int(exam.get("composite_score", 0))
+    if not has_accepted_dispute:
+        return original
+    return _clamp_score(original + accepted_delta / len(questions))
+
+
+def _round_one(value: float) -> float:
+    return round(value, 1)
+
+
 # ── Teacher configuration endpoints ──────────────────────────────────────────
 
 
@@ -474,6 +721,9 @@ async def configure_exam(
         "topics": request.topics,
         "num_questions": request.num_questions,
         "difficulty": request.difficulty,
+        "grade_level": request.grade_level,
+        "grading_personality": request.grading_personality,
+        "teacher_name": request.teacher_name,
         "special_instructions": request.special_instructions.strip(),
         "created_at": _now_iso(),
     }
@@ -500,6 +750,144 @@ async def exam_results() -> ExamResultsResponse:
     )
 
 
+@app.get("/api/exam-analytics", response_model=ExamAnalyticsResponse)
+async def exam_analytics() -> ExamAnalyticsResponse:
+    composite_scores = [_effective_composite_score(exam) for exam in _completed_exams]
+    total_questions = sum(len(exam.get("questions", [])) for exam in _completed_exams)
+    total_time = sum(
+        float(question["time_spent_seconds"])
+        for exam in _completed_exams
+        for question in exam.get("questions", [])
+    )
+
+    bucket_defs = [
+        ("0-59", 0, 59),
+        ("60-69", 60, 69),
+        ("70-79", 70, 79),
+        ("80-89", 80, 89),
+        ("90-100", 90, 100),
+    ]
+    distribution = [
+        ScoreDistributionBucket(
+            label=label,
+            min_score=min_score,
+            max_score=max_score,
+            count=sum(min_score <= score <= max_score for score in composite_scores),
+        )
+        for label, min_score, max_score in bucket_defs
+    ]
+
+    scores_by_index: dict[int, list[int]] = defaultdict(list)
+    times_by_index: dict[int, list[float]] = defaultdict(list)
+    topics_by_index: dict[int, Counter[str]] = defaultdict(Counter)
+    disputed_by_question: dict[str, dict[str, Any]] = {}
+
+    for exam in _completed_exams:
+        for question in exam.get("questions", []):
+            index = int(question["question_index"])
+            scores_by_index[index].append(_effective_question_score(question))
+            times_by_index[index].append(float(question["time_spent_seconds"]))
+            topic = question.get("topic") or "Untitled topic"
+            topics_by_index[index][topic] += 1
+
+            dispute = question.get("dispute_result")
+            if dispute is None:
+                continue
+
+            question_text = question.get("question", "")
+            key = question_text.strip().lower()
+            if key not in disputed_by_question:
+                disputed_by_question[key] = {
+                    "question_index": index,
+                    "topic": topic,
+                    "question": question_text,
+                    "dispute_count": 0,
+                    "accepted_disputes": 0,
+                    "original_scores": [],
+                }
+            item = disputed_by_question[key]
+            item["dispute_count"] += 1
+            if dispute.get("dispute_accepted"):
+                item["accepted_disputes"] += 1
+            item["original_scores"].append(int(dispute["original_score"]))
+
+    per_question = [
+        PerQuestionAnalytics(
+            question_index=index,
+            attempts=len(scores),
+            average_score=_round_one(sum(scores) / len(scores)),
+            average_time_seconds=_round_one(
+                sum(times_by_index[index]) / len(times_by_index[index])
+            ),
+            topics=[
+                topic
+                for topic, _count in topics_by_index[index].most_common(5)
+            ],
+        )
+        for index, scores in sorted(scores_by_index.items())
+        if scores
+    ]
+
+    most_disputed = [
+        DisputedQuestionAnalytics(
+            question_index=item["question_index"],
+            topic=item["topic"],
+            question=item["question"],
+            dispute_count=item["dispute_count"],
+            accepted_disputes=item["accepted_disputes"],
+            average_original_score=_round_one(
+                sum(item["original_scores"]) / len(item["original_scores"])
+            ),
+        )
+        for item in sorted(
+            disputed_by_question.values(),
+            key=lambda value: (
+                value["dispute_count"],
+                value["accepted_disputes"],
+            ),
+            reverse=True,
+        )[:5]
+        if item["original_scores"]
+    ]
+
+    sessions = [
+        AnalyticsSession(
+            session_id=exam["session_id"],
+            student_name=exam["student_name"],
+            domain=exam["domain"],
+            completed_at=exam["completed_at"],
+            num_questions=exam["num_questions"],
+            composite_score=_effective_composite_score(exam),
+            dispute_count=sum(
+                1
+                for question in exam.get("questions", [])
+                if question.get("dispute_result") is not None
+            ),
+        )
+        for exam in sorted(
+            _completed_exams,
+            key=lambda item: item["completed_at"],
+            reverse=True,
+        )
+    ]
+
+    return ExamAnalyticsResponse(
+        completed_sessions=len(_completed_exams),
+        overall_average_score=(
+            _round_one(sum(composite_scores) / len(composite_scores))
+            if composite_scores
+            else 0.0
+        ),
+        average_time_per_question=(
+            _round_one(total_time / total_questions) if total_questions else 0.0
+        ),
+        score_distribution=distribution,
+        per_question_average_scores=per_question,
+        most_disputed_questions=most_disputed,
+        sessions=sessions,
+    )
+
+
 # ── Student exam flow ────────────────────────────────────────────────────────
 
 
@@ -510,6 +898,9 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
     topics = list(request.topics)
     num_questions = request.num_questions
     difficulty: Difficulty = request.difficulty
+    grade_level: GradeLevel = request.grade_level
+    grading_personality: GradingPersonality = request.grading_personality
+    teacher_name = request.teacher_name
 
     if request.config_id is not None:
         config = _exam_configs.get(request.config_id)
@@ -518,9 +909,14 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
                 status_code=404,
                 detail=f"Exam config {request.config_id!r} not found.",
             )
+        domain = config["domain"]
+        topics = list(config["topics"])
+        num_questions = config["num_questions"]
+        difficulty = config["difficulty"]
+        grade_level = config["grade_level"]
+        grading_personality = config["grading_personality"]
+        teacher_name = config["teacher_name"]
         special_instructions = config["special_instructions"]
-        if not topics:
-            topics = list(config["topics"])
 
     session_id = uuid.uuid4().hex
     _exam_sessions[session_id] = {
@@ -528,12 +924,16 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
         "student_name": request.student_name,
         "domain": domain,
         "difficulty": difficulty,
+        "grade_level": grade_level,
+        "grading_personality": grading_personality,
+        "teacher_name": teacher_name,
         "num_questions": num_questions,
         "topics": topics,
         "config_id": request.config_id,
         "special_instructions": special_instructions,
         "questions": [],  # list[dict]
         "pending_question": None,  # dict | None (generated but not yet answered)
+        "tutor_sessions": {},  # question index string -> list[dict]
         "status": "in_progress",
         "created_at": _now_iso(),
     }
@@ -543,6 +943,9 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
         student_name=request.student_name,
         domain=domain,
         difficulty=difficulty,
+        grade_level=grade_level,
+        grading_personality=grading_personality,
+        teacher_name=teacher_name,
         num_questions=num_questions,
     )
 
@@ -599,7 +1002,8 @@ async def generate_question(
         "None yet." if not covered else "\n".join(f"- {t}" for t in covered)
     )
     focus_block = (
-        f"Focus the question specifically on this subtopic: {focus_topic}"
+        "Focus the question specifically on this subtopic: "
+        f"{focus_topic}. Set the topic field exactly to this subtopic."
         if focus_topic
         else (
             "Pick a subtopic that is clearly distinct from any already-covered "
@@ -614,10 +1018,13 @@ async def generate_question(
 
     difficulty = session["difficulty"]
     style_guidance = DIFFICULTY_QUESTION_STYLE[difficulty]
+    grade_level: GradeLevel = session["grade_level"]
+    grade_level_guidance = GRADE_LEVEL_QUESTION_STYLE[grade_level]
 
     system_prompt = (
         "You are an expert educational assessment designer. Generate exactly "
-        "one essay question tailored to the given domain, difficulty, and "
+        "one essay question tailored to the given domain, difficulty, grade "
+        "level, and "
         "subtopic constraints. Respond only with valid JSON matching this "
         f"schema: {prompt_schema}. "
         "The background_info must be a short paragraph of context. "
@@ -625,12 +1032,14 @@ async def generate_question(
         "The grading_rubric must be 3-5 concise criteria. "
         "The topic must be a short 2-6 word label naming the subtopic. "
         f"Difficulty guidance: {style_guidance} "
+        f"Grade level guidance: {grade_level_guidance} "
         "Do not include markdown, code fences, or any extra text."
     )
 
     user_prompt = (
         f"Domain: {session['domain']}\n"
         f"Difficulty: {difficulty}\n"
+        f"Grade level: {grade_level}\n"
         f"Question number: {question_index + 1} of {total_questions}\n"
         f"Already-covered subtopics (do NOT repeat):\n{covered_block}\n"
         f"{focus_block}\n"
@@ -647,7 +1056,9 @@ async def generate_question(
     )
 
     pending = {
-        "topic": generated.topic.strip() or (focus_topic or f"Question {question_index + 1}"),
+        "topic": focus_topic
+        or generated.topic.strip()
+        or f"Question {question_index + 1}",
         "background_info": generated.background_info.strip(),
         "question": generated.question.strip(),
         "grading_rubric": [r.strip() for r in generated.grading_rubric if r.strip()],
@@ -715,6 +1126,12 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
     question_index = len(session["questions"])
     difficulty = session["difficulty"]
     strictness = DIFFICULTY_GRADING_STRICTNESS[difficulty]
+    grade_level: GradeLevel = session["grade_level"]
+    grade_expectations = GRADE_LEVEL_GRADING_EXPECTATIONS[grade_level]
+    grading_personality: GradingPersonality = session["grading_personality"]
+    personality_guidance = GRADING_PERSONALITY_GUIDANCE[grading_personality]
+    teacher_name = session["teacher_name"]
+    feedback_label = _feedback_label(teacher_name)
     rubric: list[str] = pending["grading_rubric"]
 
     prompt_schema = build_prompt_schema(GradeAnswerResponse)
@@ -740,10 +1157,17 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
         "Use time_spent_seconds as context, but do not reward or penalize "
         "time on its own unless clearly relevant to answer quality. "
         f"Difficulty calibration: {strictness} "
+        f"Grade level calibration: {grade_expectations} "
+        f"Grading personality: {personality_guidance} "
+        "Feedback identity: the grading_explanation must begin with "
+        f"{feedback_label!r}. "
         "Do not include markdown, code fences, or any extra text."
     )
 
     user_prompt = (
+        f"Domain: {session['domain']}\n"
+        f"Difficulty: {difficulty}\n"
+        f"Grade level: {grade_level}\n\n"
         f"Question:\n{pending['question']}\n\n"
         f"Grading rubric:\n{rubric_lines}\n\n"
         f"Background info:\n{pending['background_info']}\n\n"
@@ -781,7 +1205,11 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
         "time_spent_seconds": request.time_spent_seconds,
         "criterion_scores": [cs.model_dump() for cs in aligned_scores],
         "overall_score": graded.overall_score,
-        "grading_explanation": graded.grading_explanation,
+        "grading_explanation": _ensure_named_feedback(
+            graded.grading_explanation,
+            teacher_name,
+        ),
+        "dispute_result": None,
     }
     session["questions"].append(record)
     session["pending_question"] = None
@@ -789,9 +1217,100 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
     return GradeAnswerResponse(
         criterion_scores=aligned_scores,
         overall_score=graded.overall_score,
-        grading_explanation=graded.grading_explanation,
+        grading_explanation=record["grading_explanation"],
         question_index=question_index,
     )
+
+
+@app.post("/api/dispute-grade", response_model=GradeDisputeResponse)
+async def dispute_grade(request: GradeDisputeRequest) -> GradeDisputeResponse:
+    session = _require_session(request.session_id)
+
+    if request.question_index >= len(session["questions"]):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Question index {request.question_index} not found.",
+        )
+
+    question = session["questions"][request.question_index]
+    if question.get("dispute_result") is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="This question has already been disputed.",
+        )
+
+    original_score = int(question["overall_score"])
+    prompt_schema = build_prompt_schema(LLMGradeDisputeDecision)
+    rubric_lines = "\n".join(
+        f"{index}. {criterion}"
+        for index, criterion in enumerate(question["grading_rubric"], start=1)
+    )
+    criterion_lines = "\n".join(
+        (
+            f"- {score['criterion']}: {score['score']}/100. "
+            f"Feedback: {score['feedback']}"
+        )
+        for score in question["criterion_scores"]
+    )
+
+    system_prompt = (
+        "You are an impartial grade appeals reviewer. Evaluate whether the "
+        "student's dispute identifies a genuine grading issue, such as "
+        "evidence in the original answer that was overlooked, a rubric "
+        "misapplication, or an explanation that shows the original score was "
+        "too low. Do not award credit for new facts introduced only in the "
+        "dispute unless they point to content already present in the original "
+        "answer. If the dispute has merit, accept it and issue a higher "
+        "revised_score. If it lacks merit, uphold the original score and set "
+        "revised_score equal to the original score. Respond only with valid "
+        f"JSON matching this schema: {prompt_schema}. "
+        "Do not include markdown, code fences, or any extra text."
+    )
+
+    user_prompt = (
+        f"Domain: {session['domain']}\n"
+        f"Difficulty: {session['difficulty']}\n"
+        f"Grade level: {session['grade_level']}\n"
+        f"Question topic: {question['topic']}\n\n"
+        f"Question:\n{question['question']}\n\n"
+        f"Background info:\n{question['background_info']}\n\n"
+        f"Rubric:\n{rubric_lines}\n\n"
+        f"Student's original answer:\n{question['student_answer']}\n\n"
+        "Original grading result:\n"
+        f"Overall score: {original_score}/100\n"
+        f"Grading explanation: {question['grading_explanation']}\n"
+        f"Per-criterion scores:\n{criterion_lines}\n\n"
+        f"Student's dispute argument:\n{request.dispute_argument}"
+    )
+
+    decision = await call_together_json(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_model=LLMGradeDisputeDecision,
+        temperature=0.2,
+    )
+
+    accepted = decision.dispute_accepted and decision.revised_score > original_score
+    revised_score = decision.revised_score if accepted else original_score
+    result = GradeDisputeResponse(
+        dispute_accepted=accepted,
+        original_score=original_score,
+        revised_score=revised_score,
+        reviewer_explanation=decision.reviewer_explanation.strip(),
+    )
+
+    question["dispute_result"] = result.model_dump()
+
+    completed_exam = _find_completed_exam(request.session_id)
+    if completed_exam is not None:
+        for completed_question in completed_exam.get("questions", []):
+            if completed_question["question_index"] == request.question_index:
+                completed_question["dispute_result"] = result.model_dump()
+                break
+
+    return result
 
 
 @app.post("/api/finish-exam", response_model=FinishExamResponse)
@@ -812,6 +1331,12 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
 
     difficulty: Difficulty = session["difficulty"]
     strictness = DIFFICULTY_GRADING_STRICTNESS[difficulty]
+    grade_level: GradeLevel = session["grade_level"]
+    grade_expectations = GRADE_LEVEL_GRADING_EXPECTATIONS[grade_level]
+    grading_personality: GradingPersonality = session["grading_personality"]
+    personality_guidance = GRADING_PERSONALITY_GUIDANCE[grading_personality]
+    teacher_name = session["teacher_name"]
+    feedback_label = _feedback_label(teacher_name)
 
     # Build the summary the LLM reads. Keep it compact: rubric-level scores,
     # overall scores per question, and the student's answer.
@@ -846,12 +1371,17 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
         "main weaknesses, and the most impactful specific things the "
         "student should do to improve. "
         f"Difficulty calibration: {strictness} "
+        f"Grade level calibration: {grade_expectations} "
+        f"Grading personality: {personality_guidance} "
+        "Feedback identity: the composite_feedback must begin with "
+        f"{feedback_label!r}. "
         "Do not include markdown, code fences, or any extra text."
     )
 
     user_prompt = (
         f"Domain: {session['domain']}\n"
         f"Difficulty: {difficulty}\n"
+        f"Grade level: {grade_level}\n"
         f"Student: {session['student_name']}\n"
         f"Total questions: {len(session['questions'])}\n\n"
         f"Per-question detail:\n\n" + "\n".join(summary_lines)
@@ -878,6 +1408,11 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
             overall_score=q["overall_score"],
             grading_explanation=q["grading_explanation"],
             time_spent_seconds=q["time_spent_seconds"],
+            dispute_result=(
+                GradeDisputeResponse(**q["dispute_result"])
+                if q.get("dispute_result")
+                else None
+            ),
         )
         for q in session["questions"]
     ]
@@ -890,10 +1425,16 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
         student_name=session["student_name"],
         domain=session["domain"],
         difficulty=difficulty,
+        grade_level=grade_level,
+        grading_personality=grading_personality,
+        teacher_name=teacher_name,
         num_questions=session["num_questions"],
         questions=question_reports,
         composite_score=composite.composite_score,
-        composite_feedback=composite.composite_feedback,
+        composite_feedback=_ensure_named_feedback(
+            composite.composite_feedback,
+            teacher_name,
+        ),
         total_time_seconds=total_time,
         completed_at=completed_at,
     )
@@ -902,3 +1443,102 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
     _completed_exams.append(result.model_dump())
 
     return result
+
+
+@app.post("/api/tutor-session", response_model=TutorSessionResponse)
+async def tutor_session(request: TutorSessionRequest) -> TutorSessionResponse:
+    session = _require_session(request.session_id)
+
+    if request.question_index >= len(session["questions"]):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Question index {request.question_index} not found.",
+        )
+
+    question = session["questions"][request.question_index]
+    tutor_sessions: dict[str, list[dict[str, Any]]] = session.setdefault(
+        "tutor_sessions",
+        {},
+    )
+    key = str(request.question_index)
+    history = tutor_sessions.setdefault(key, [])
+
+    incoming = request.message.strip()
+    if history and not incoming:
+        return TutorSessionResponse(
+            session_id=request.session_id,
+            question_index=request.question_index,
+            messages=[TutorMessage(**message) for message in history],
+        )
+
+    if incoming:
+        history.append(
+            {
+                "role": "student",
+                "content": incoming,
+                "created_at": _now_iso(),
+            }
+        )
+
+    prompt_schema = build_prompt_schema(LLMTutorTurn)
+    system_prompt = (
+        "You are a patient tutor helping a student study after an exam. "
+        "Re-explain the topic area in simpler terms, diagnose the student's "
+        "misunderstanding from their original answer and grading feedback, "
+        "ask one manageable follow-up question at a time, and give hints "
+        "rather than direct answers. Keep the tone supportive and concrete. "
+        "Respond only with valid JSON matching this schema: "
+        f"{prompt_schema}. Do not include markdown, code fences, or any "
+        "extra text."
+    )
+    context_prompt = (
+        f"Domain: {session['domain']}\n"
+        f"Difficulty: {session['difficulty']}\n"
+        f"Grade level: {session['grade_level']}\n"
+        f"Topic: {question['topic']}\n"
+        f"Question:\n{question['question']}\n\n"
+        f"Student's original answer:\n{question['student_answer']}\n\n"
+        f"Original score: {question['overall_score']}/100\n"
+        f"Grading feedback:\n{question['grading_explanation']}\n\n"
+        "Begin or continue a tutoring conversation. If this is the first "
+        "turn, start with a short re-explanation and then ask a simpler "
+        "follow-up question."
+    )
+
+    llm_messages: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": context_prompt},
+    ]
+    for message in history:
+        llm_messages.append(
+            {
+                "role": "assistant" if message["role"] == "tutor" else "user",
+                "content": message["content"],
+            }
+        )
+    if not history:
+        llm_messages.append(
+            {
+                "role": "user",
+                "content": "Please start the tutoring session now.",
+            }
+        )
+
+    tutor_turn = await call_together_json(
+        messages=llm_messages,
+        response_model=LLMTutorTurn,
+        temperature=0.5,
+    )
+    history.append(
+        {
+            "role": "tutor",
+            "content": tutor_turn.message.strip(),
+            "created_at": _now_iso(),
+        }
+    )
+
+    return TutorSessionResponse(
+        session_id=request.session_id,
+        question_index=request.question_index,
+        messages=[TutorMessage(**message) for message in history],
+    )

@@ -134,8 +134,8 @@ body {
     90deg,
     transparent 0,
     transparent 48px,
-    rgba(138, 28, 28, 0.5) 48px,
-    rgba(138, 28, 28, 0.5) 49px,
+    rgba(20, 16, 11, 0.16) 48px,
+    rgba(20, 16, 11, 0.16) 49px,
     transparent 49px
   );
 }
@@ -194,6 +194,18 @@ body {
   background: var(--color-ink);
   color: var(--color-ivory);
 }
+.btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(20, 16, 11, 0.5);
+  outline-offset: 3px;
+}
 
 .input-field {
   width: 100%;
@@ -207,8 +219,7 @@ body {
   transition: border-color 150ms ease;
 }
 .input-field:focus {
-  outline: none;
-  border-bottom-color: var(--color-oxblood);
+  border-bottom-color: var(--color-ink);
 }
 .input-field::placeholder {
   color: rgba(20, 16, 11, 0.35);
@@ -229,7 +240,7 @@ textarea.input-field {
   resize: vertical;
 }
 textarea.input-field:focus {
-  border-color: var(--color-oxblood);
+  border-color: var(--color-ink);
 }
 
 .field-label {
@@ -369,7 +380,7 @@ textarea.input-field:focus {
 .door-title {
   font-family: var(--font-display);
   font-weight: 400;
-  font-size: clamp(2.2rem, 4.5vw, 3.4rem);
+  font-size: clamp(2rem, 4vw, 3.1rem);
   line-height: 0.95;
   letter-spacing: -0.01em;
 }
@@ -393,4 +404,47 @@ textarea.input-field:focus {
   font-family: var(--font-display);
   font-style: italic;
   font-weight: 400;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.table-wrap table {
+  min-width: 720px;
+}
+
+.chat-bubble {
+  max-width: 88%;
+  padding: 1rem 1.1rem;
+  border: 1px solid rgba(20, 16, 11, 0.16);
+  background: rgba(20, 16, 11, 0.045);
+}
+
+.chat-bubble-tutor {
+  margin-right: auto;
+}
+
+.chat-bubble-student {
+  margin-left: auto;
+  background: #fbf6ea;
+  box-shadow: 3px 3px 0 0 rgba(20, 16, 11, 0.12);
+}
+
+@media (max-width: 640px) {
+  .paper {
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.5) inset,
+      0 10px 24px -18px rgba(20, 16, 11, 0.24);
+  }
+
+  .paper-margin {
+    background-image: none;
+  }
+
+  .btn-primary,
+  .btn-ghost {
+    width: 100%;
+  }
 }
