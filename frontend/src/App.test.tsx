@@ -7,6 +7,7 @@ import App from './App'
 const startExamResponse = {
   session_id: 'test-session-1',
   student_name: 'Livia',
+  student_id: 'student-1',
   domain: 'Roman History',
   difficulty: 'medium' as const,
   grade_level: 'High School' as const,
@@ -45,6 +46,7 @@ const gradedAnswer = {
 const finishedExam = {
   session_id: 'test-session-1',
   student_name: 'Livia',
+  student_id: 'student-1',
   domain: 'Roman History',
   difficulty: 'medium' as const,
   grade_level: 'High School' as const,
@@ -85,6 +87,13 @@ const configuredExam = {
   created_at: '2026-04-16T10:00:00.000Z',
 }
 
+const studentProfile = {
+  student_id: 'student-1',
+  name: 'Livia',
+  email: 'livia@example.edu',
+  created_at: '2026-04-16T09:55:00.000Z',
+}
+
 function mockFetchResponse(body: unknown, options?: { ok?: boolean; status?: number }) {
   return {
     ok: options?.ok ?? true,
@@ -94,17 +103,48 @@ function mockFetchResponse(body: unknown, options?: { ok?: boolean; status?: num
 }
 
 beforeEach(() => {
+  let store: Record<string, string> = {}
+  const localStorageMock: Storage = {
+    get length() {
+      return Object.keys(store).length
+    },
+    clear: vi.fn(() => {
+      store = {}
+    }),
+    getItem: vi.fn((key: string) => store[key] ?? null),
+    key: vi.fn((index: number) => Object.keys(store)[index] ?? null),
+    removeItem: vi.fn((key: string) => {
+      delete store[key]
+    }),
+    setItem: vi.fn((key: string, value: string) => {
+      store[key] = value
+    }),
+  }
+  Object.defineProperty(window, 'localStorage', {
+    value: localStorageMock,
+    configurable: true,
+  })
   window.history.pushState({}, '', '/')
+  window.localStorage.clear()
 })
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  window.localStorage.clear()
 })
+
+function storeStudent() {
+  window.localStorage.setItem('exam-bureau-student', JSON.stringify(studentProfile))
+}
 
 describe('App', () => {
   it('routes from the landing page to student setup and back to teacher lounge', async () => {
     const user = userEvent.setup()
-    const fetchMock = vi.fn().mockResolvedValue(mockFetchResponse([]))
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/auth/login') return Promise.resolve(mockFetchResponse(studentProfile))
+      if (url === '/api/exam-configs') return Promise.resolve(mockFetchResponse([]))
+      return Promise.reject(new Error(`unexpected url ${url}`))
+    })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
@@ -112,7 +152,11 @@ describe('App', () => {
     expect(screen.getByText(/begin the examination/i)).toBeInTheDocument()
 
     await user.click(screen.getByText(/begin the examination/i))
-    expect(await screen.findByText(/sign the roll, pick an exam/i)).toBeInTheDocument()
+    expect(await screen.findByText(/create an account or reopen your record/i)).toBeInTheDocument()
+    await user.type(screen.getByLabelText(/^name$/i), 'Livia')
+    await user.type(screen.getByLabelText(/^email$/i), 'livia@example.edu')
+    await user.click(screen.getByRole('button', { name: /enter the hall/i }))
+    expect(await screen.findByText(/pick an exam and commence/i)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /back to foyer/i }))
     await user.click(screen.getByText(/enter the faculty lounge/i))
@@ -123,6 +167,7 @@ describe('App', () => {
 
   it('completes a student exam end-to-end, showing per-criterion feedback and composite', async () => {
     const user = userEvent.setup()
+    storeStudent()
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url === '/api/exam-configs') {
         return Promise.resolve(mockFetchResponse([]))
@@ -146,9 +191,8 @@ describe('App', () => {
     window.history.pushState({}, '', '/student')
     render(<App />)
 
-    await screen.findByText(/sign the roll, pick an exam/i)
+    await screen.findByText(/pick an exam and commence/i)
 
-    await user.type(screen.getByLabelText(/your name/i), 'Livia')
     await user.type(screen.getByLabelText(/^domain$/i), 'Roman History')
     await user.click(screen.getByRole('button', { name: /begin the exam/i }))
 
@@ -179,6 +223,7 @@ describe('App', () => {
     const startBody = JSON.parse((startCall![1] as RequestInit).body as string)
     expect(startBody).toMatchObject({
       domain: 'Roman History',
+      student_id: 'student-1',
       student_name: 'Livia',
       num_questions: 3,
       difficulty: 'medium',
@@ -196,6 +241,7 @@ describe('App', () => {
 
   it('shows an error message when start-exam fails', async () => {
     const user = userEvent.setup()
+    storeStudent()
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url === '/api/exam-configs') return Promise.resolve(mockFetchResponse([]))
       if (url === '/api/start-exam') {
@@ -210,7 +256,7 @@ describe('App', () => {
     window.history.pushState({}, '', '/student')
     render(<App />)
 
-    await screen.findByText(/sign the roll, pick an exam/i)
+    await screen.findByText(/pick an exam and commence/i)
     await user.type(screen.getByLabelText(/^domain$/i), 'Math')
     await user.click(screen.getByRole('button', { name: /begin the exam/i }))
 
@@ -219,6 +265,7 @@ describe('App', () => {
 
   it('supports teacher topic config, student dispute, tutor launch, and analytics dashboard', async () => {
     const user = userEvent.setup()
+    storeStudent()
     const lowGrade = {
       ...gradedAnswer,
       criterion_scores: gradedAnswer.criterion_scores.map(c => ({ ...c, score: 72 })),
@@ -356,8 +403,7 @@ describe('App', () => {
     })
 
     await user.click(screen.getByRole('button', { name: /preview as student/i }))
-    await screen.findByText(/sign the roll/i)
-    await user.type(screen.getByLabelText(/your name/i), 'Livia')
+    await screen.findByText(/pick an exam and commence/i)
     await user.click(screen.getByRole('button', { name: /begin the exam/i }))
 
     await screen.findByText(/western roman empire fall/i)

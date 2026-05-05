@@ -12,6 +12,14 @@ cp .env.example .env
 ```
 
 Set `TOGETHER_API_KEY` in `.env`.
+Set `CONVEX_URL` to your Convex deployment URL to persist exams, sessions, questions, disputes, tutor conversations, and student accounts across server restarts. Without `CONVEX_URL`, the API uses the in-memory fallback used by tests.
+
+Deploy or run the Convex backend from the repo root:
+
+```bash
+npm install
+npx convex dev
+```
 
 ## Run
 
@@ -48,8 +56,18 @@ npm test
 
 - `GET /` health check
 - `GET /health` health check
+- `POST /api/auth/login`
+- `POST /api/configure-exam`
+- `GET /api/exam-configs`
+- `POST /api/start-exam`
 - `POST /api/generate-question`
 - `POST /api/grade-answer`
+- `POST /api/finish-exam`
+- `POST /api/dispute-grade`
+- `POST /api/tutor-session`
+- `GET /api/student/history?student_id=...`
+- `GET /api/exam-results`
+- `GET /api/exam-analytics`
 
 Example request:
 

@@ -13,6 +13,8 @@ def _clean_state() -> None:
     main._exam_configs.clear()
     main._exam_sessions.clear()
     main._completed_exams.clear()
+    main._students.clear()
+    main._student_ids_by_email.clear()
 
 
 @pytest.fixture
@@ -158,6 +160,98 @@ def test_full_exam_flow_grades_and_finishes(
     results = client.get("/api/exam-results").json()
     assert len(results["exams"]) == 1
     assert results["exams"][0]["student_name"] == "Livia"
+
+
+def test_student_login_and_history_tracks_multiple_completed_exams(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grade_scores = [70, 90]
+    generate_call_count = {"count": 0}
+
+    async def fake_call_together_json(**kwargs: Any) -> Any:
+        model = kwargs["response_model"]
+        if model is main.LLMGeneratedQuestion:
+            generate_call_count["count"] += 1
+            return main.LLMGeneratedQuestion(
+                background_info="Context.",
+                question=f"Essay question {generate_call_count['count']}?",
+                grading_rubric=["Explains the topic"],
+                topic="Topic",
+            )
+        if model is main.GradeAnswerResponse:
+            score = grade_scores.pop(0)
+            return main.GradeAnswerResponse(
+                criterion_scores=[
+                    main.CriterionScore(
+                        criterion="Explains the topic",
+                        score=score,
+                        feedback="Keep adding evidence.",
+                    ),
+                ],
+                overall_score=score,
+                grading_explanation="Good direction; add evidence.",
+                question_index=0,
+            )
+        if model is main.LLMComposite:
+            score = 70 if generate_call_count["count"] == 1 else 90
+            return main.LLMComposite(
+                composite_score=score,
+                composite_feedback="Composite feedback.",
+            )
+        raise AssertionError(f"Unexpected response_model: {model}")
+
+    monkeypatch.setattr(main, "call_together_json", fake_call_together_json)
+
+    login = client.post(
+        "/api/auth/login",
+        json={"name": "Livia", "email": "LIVIA@example.edu"},
+    )
+    assert login.status_code == 200
+    student_id = login.json()["student_id"]
+    assert login.json()["email"] == "livia@example.edu"
+
+    for domain in ("Roman History", "Greek History"):
+        start = client.post(
+            "/api/start-exam",
+            json={
+                "student_id": student_id,
+                "domain": domain,
+                "num_questions": 1,
+                "difficulty": "medium",
+            },
+        )
+        assert start.status_code == 200
+        assert start.json()["student_name"] == "Livia"
+        session_id = start.json()["session_id"]
+
+        client.post("/api/generate-question", json={"session_id": session_id, "student_id": student_id})
+        client.post(
+            "/api/grade-answer",
+            json={
+                "session_id": session_id,
+                "student_id": student_id,
+                "student_answer": "A concise answer.",
+                "time_spent_seconds": 60,
+            },
+        )
+        finish = client.post(
+            "/api/finish-exam",
+            json={"session_id": session_id, "student_id": student_id},
+        )
+        assert finish.status_code == 200
+
+    history = client.get(f"/api/student/history?student_id={student_id}")
+    assert history.status_code == 200
+    payload = history.json()
+    assert payload["student_name"] == "Livia"
+    assert payload["summary"]["total_exams"] == 2
+    assert payload["summary"]["average_score"] == 80.0
+    assert payload["summary"]["trend"] == "up"
+    assert [session["domain"] for session in payload["sessions"]] == [
+        "Greek History",
+        "Roman History",
+    ]
+    assert payload["sessions"][0]["questions"][0]["effective_score"] == 90
 
 
 def test_generate_question_rejects_when_exam_full(

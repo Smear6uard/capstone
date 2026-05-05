@@ -10,7 +10,7 @@ from typing import Any, Literal, Optional, TypeVar
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -135,6 +135,34 @@ class HealthCheckResponse(BaseModel):
     status: str
 
 
+class AuthLoginRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=320)
+
+    @field_validator("name")
+    @classmethod
+    def _clean_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("name must not be empty")
+        return cleaned
+
+    @field_validator("email")
+    @classmethod
+    def _clean_email(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", cleaned):
+            raise ValueError("email must be a valid email address")
+        return cleaned
+
+
+class AuthLoginResponse(BaseModel):
+    student_id: str
+    name: str
+    email: str
+    created_at: str
+
+
 class ConfigureExamRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=200)
     topics: list[str] = Field(default_factory=list, max_length=20)
@@ -191,6 +219,7 @@ class StartExamRequest(BaseModel):
     teacher_name: str = Field(default="", max_length=120)
     topics: list[str] = Field(default_factory=list, max_length=20)
     student_name: str = Field(default="Anonymous Student", max_length=120)
+    student_id: Optional[str] = None
     config_id: Optional[str] = None
 
     @field_validator("domain", "student_name")
@@ -220,6 +249,7 @@ class StartExamRequest(BaseModel):
 class StartExamResponse(BaseModel):
     session_id: str
     student_name: str
+    student_id: Optional[str] = None
     domain: str
     difficulty: Difficulty
     grade_level: GradeLevel
@@ -230,6 +260,7 @@ class StartExamResponse(BaseModel):
 
 class GenerateQuestionRequest(BaseModel):
     session_id: str = Field(min_length=1)
+    student_id: Optional[str] = None
 
 
 class GenerateQuestionResponse(BaseModel):
@@ -257,6 +288,7 @@ class LLMGeneratedQuestion(BaseModel):
 
 class GradeAnswerRequest(BaseModel):
     session_id: str = Field(min_length=1)
+    student_id: Optional[str] = None
     student_answer: str = Field(min_length=1, max_length=25000)
     time_spent_seconds: float = Field(ge=0, le=86400)
 
@@ -284,6 +316,7 @@ class GradeAnswerResponse(BaseModel):
 
 class GradeDisputeRequest(BaseModel):
     session_id: str = Field(min_length=1)
+    student_id: Optional[str] = None
     question_index: int = Field(ge=0)
     dispute_argument: str = Field(min_length=1, max_length=5000)
 
@@ -311,6 +344,7 @@ class GradeDisputeResponse(BaseModel):
 
 class FinishExamRequest(BaseModel):
     session_id: str = Field(min_length=1)
+    student_id: Optional[str] = None
 
 
 class QuestionReport(BaseModel):
@@ -330,6 +364,7 @@ class QuestionReport(BaseModel):
 class FinishExamResponse(BaseModel):
     session_id: str
     student_name: str
+    student_id: Optional[str] = None
     domain: str
     difficulty: Difficulty
     grade_level: GradeLevel
@@ -398,6 +433,7 @@ class ExamAnalyticsResponse(BaseModel):
 
 class TutorSessionRequest(BaseModel):
     session_id: str = Field(min_length=1)
+    student_id: Optional[str] = None
     question_index: int = Field(ge=0)
     message: str = Field(default="", max_length=5000)
 
@@ -423,6 +459,43 @@ class TutorSessionResponse(BaseModel):
     messages: list[TutorMessage]
 
 
+class StudentHistoryQuestion(BaseModel):
+    question_index: int
+    topic: str
+    question: str
+    overall_score: int
+    effective_score: int
+    grading_explanation: str
+    criterion_scores: list[CriterionScore]
+    dispute_result: Optional[GradeDisputeResponse] = None
+
+
+class StudentHistorySession(BaseModel):
+    session_id: str
+    domain: str
+    difficulty: Difficulty
+    grade_level: GradeLevel
+    completed_at: str
+    num_questions: int
+    composite_score: int
+    questions: list[StudentHistoryQuestion]
+
+
+class StudentProgressSummary(BaseModel):
+    total_exams: int
+    average_score: float
+    trend: Literal["up", "down", "flat", "insufficient_data"]
+    first_half_average: float
+    second_half_average: float
+
+
+class StudentHistoryResponse(BaseModel):
+    student_id: str
+    student_name: str
+    summary: StudentProgressSummary
+    sessions: list[StudentHistorySession]
+
+
 # ── App setup ────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Capstone Question Generator API")
@@ -436,16 +509,287 @@ app.add_middleware(
 )
 
 
-# In-memory stores. Swap these for a DB when persistence is needed.
+# Memory fallback used by tests and by local development before CONVEX_URL is set.
 _exam_configs: dict[str, dict[str, Any]] = {}
 _exam_sessions: dict[str, dict[str, Any]] = {}
 _completed_exams: list[dict[str, Any]] = []
+_students: dict[str, dict[str, Any]] = {}
+_student_ids_by_email: dict[str, str] = {}
+
+
+class MemoryExamStore:
+    async def login_student(self, *, name: str, email: str) -> dict[str, Any]:
+        existing_id = _student_ids_by_email.get(email)
+        if existing_id is not None:
+            student = _students[existing_id]
+            student["name"] = name
+            student["updated_at"] = _now_iso()
+            return student
+
+        student_id = uuid.uuid4().hex
+        student = {
+            "student_id": student_id,
+            "name": name,
+            "email": email,
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+        _students[student_id] = student
+        _student_ids_by_email[email] = student_id
+        return student
+
+    async def get_student(self, student_id: str) -> dict[str, Any] | None:
+        return _students.get(student_id)
+
+    async def save_exam_config(self, record: dict[str, Any]) -> None:
+        _exam_configs[record["config_id"]] = record
+
+    async def list_exam_configs(self) -> list[dict[str, Any]]:
+        return sorted(
+            _exam_configs.values(),
+            key=lambda c: c["created_at"],
+            reverse=True,
+        )
+
+    async def get_exam_config(self, config_id: str) -> dict[str, Any] | None:
+        return _exam_configs.get(config_id)
+
+    async def create_session(self, record: dict[str, Any]) -> None:
+        _exam_sessions[record["session_id"]] = record
+
+    async def get_session(
+        self,
+        session_id: str,
+        student_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        session = _exam_sessions.get(session_id)
+        if session is None:
+            return None
+        if student_id and session.get("student_id") not in (None, student_id):
+            raise HTTPException(status_code=403, detail="Session does not belong to this student.")
+        return session
+
+    async def set_pending_question(
+        self,
+        session_id: str,
+        pending: dict[str, Any] | None,
+    ) -> None:
+        _exam_sessions[session_id]["pending_question"] = pending
+
+    async def insert_question(
+        self,
+        session_id: str,
+        question: dict[str, Any],
+    ) -> None:
+        session = _exam_sessions[session_id]
+        session["questions"].append(question)
+        session["pending_question"] = None
+
+    async def save_dispute(
+        self,
+        session_id: str,
+        question_index: int,
+        dispute_argument: str,
+        result: dict[str, Any],
+    ) -> None:
+        session = _exam_sessions[session_id]
+        session["questions"][question_index]["dispute_result"] = result
+        session["questions"][question_index]["dispute_argument"] = dispute_argument
+        for completed_exam in _completed_exams:
+            if completed_exam.get("session_id") != session_id:
+                continue
+            for completed_question in completed_exam.get("questions", []):
+                if completed_question["question_index"] == question_index:
+                    completed_question["dispute_result"] = result
+                    break
+
+    async def complete_session(
+        self,
+        session_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        session = _exam_sessions[session_id]
+        session["status"] = "completed"
+        session["completed_at"] = result["completed_at"]
+        session["composite_score"] = result["composite_score"]
+        session["composite_feedback"] = result["composite_feedback"]
+        session["total_time_seconds"] = result["total_time_seconds"]
+        _completed_exams.append(result)
+
+    async def list_completed_exams(self) -> list[dict[str, Any]]:
+        return list(_completed_exams)
+
+    async def list_student_completed_exams(self, student_id: str) -> list[dict[str, Any]]:
+        return [
+            exam
+            for exam in _completed_exams
+            if exam.get("student_id") == student_id
+        ]
+
+    async def save_tutor_messages(
+        self,
+        session_id: str,
+        question_index: int,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        session = _exam_sessions[session_id]
+        tutor_sessions = session.setdefault("tutor_sessions", {})
+        tutor_sessions[str(question_index)] = messages
+
+
+class ConvexExamStore:
+    def __init__(self, convex_url: str) -> None:
+        self.convex_url = convex_url.rstrip("/")
+
+    async def _call(self, kind: Literal["query", "mutation"], path: str, args: dict[str, Any]) -> Any:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            response = await client.post(
+                f"{self.convex_url}/api/{kind}",
+                json={"path": path, "args": args, "format": "json"},
+                headers={"Content-Type": "application/json"},
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Convex returned invalid JSON.",
+            ) from exc
+
+        if response.status_code >= 400 or payload.get("status") == "error":
+            raise HTTPException(
+                status_code=502,
+                detail=payload.get("errorMessage") or response.text,
+            )
+        return payload.get("value")
+
+    async def login_student(self, *, name: str, email: str) -> dict[str, Any]:
+        return await self._call("mutation", "students:login", {"name": name, "email": email})
+
+    async def get_student(self, student_id: str) -> dict[str, Any] | None:
+        return await self._call("query", "students:get", {"student_id": student_id})
+
+    async def save_exam_config(self, record: dict[str, Any]) -> None:
+        await self._call("mutation", "exams:save", {"exam": record})
+
+    async def list_exam_configs(self) -> list[dict[str, Any]]:
+        return await self._call("query", "exams:list", {})
+
+    async def get_exam_config(self, config_id: str) -> dict[str, Any] | None:
+        return await self._call("query", "exams:get", {"config_id": config_id})
+
+    async def create_session(self, record: dict[str, Any]) -> None:
+        await self._call("mutation", "sessions:create", {"session": record})
+
+    async def get_session(
+        self,
+        session_id: str,
+        student_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        return await self._call(
+            "query",
+            "sessions:get",
+            {"session_id": session_id, "student_id": student_id},
+        )
+
+    async def set_pending_question(
+        self,
+        session_id: str,
+        pending: dict[str, Any] | None,
+    ) -> None:
+        await self._call(
+            "mutation",
+            "sessions:setPendingQuestion",
+            {"session_id": session_id, "pending_question": pending},
+        )
+
+    async def insert_question(
+        self,
+        session_id: str,
+        question: dict[str, Any],
+    ) -> None:
+        await self._call(
+            "mutation",
+            "questions:createForSession",
+            {"session_id": session_id, "question": question},
+        )
+
+    async def save_dispute(
+        self,
+        session_id: str,
+        question_index: int,
+        dispute_argument: str,
+        result: dict[str, Any],
+    ) -> None:
+        await self._call(
+            "mutation",
+            "disputes:create",
+            {
+                "session_id": session_id,
+                "question_index": question_index,
+                "dispute_argument": dispute_argument,
+                "result": result,
+            },
+        )
+
+    async def complete_session(
+        self,
+        session_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        await self._call(
+            "mutation",
+            "sessions:complete",
+            {"session_id": session_id, "result": result},
+        )
+
+    async def list_completed_exams(self) -> list[dict[str, Any]]:
+        return await self._call("query", "sessions:listCompleted", {})
+
+    async def list_student_completed_exams(self, student_id: str) -> list[dict[str, Any]]:
+        return await self._call(
+            "query",
+            "sessions:listByStudent",
+            {"student_id": student_id},
+        )
+
+    async def save_tutor_messages(
+        self,
+        session_id: str,
+        question_index: int,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        await self._call(
+            "mutation",
+            "tutor_conversations:save",
+            {
+                "session_id": session_id,
+                "question_index": question_index,
+                "messages": messages,
+            },
+        )
+
+
+def _build_store() -> MemoryExamStore | ConvexExamStore:
+    convex_url = os.getenv("CONVEX_URL", "").strip()
+    if convex_url:
+        return ConvexExamStore(convex_url)
+    return MemoryExamStore()
+
+
+_store = _build_store()
 
 
 @app.get("/", response_model=HealthCheckResponse)
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check() -> HealthCheckResponse:
     return HealthCheckResponse(status="ok")
+
+
+@app.post("/api/auth/login", response_model=AuthLoginResponse)
+async def auth_login(request: AuthLoginRequest) -> AuthLoginResponse:
+    student = await _store.login_student(name=request.name, email=request.email)
+    return AuthLoginResponse(**student)
 
 
 # ── Together API helpers ─────────────────────────────────────────────────────
@@ -638,8 +982,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _require_session(session_id: str) -> dict[str, Any]:
-    session = _exam_sessions.get(session_id)
+async def _require_session(
+    session_id: str,
+    student_id: str | None = None,
+) -> dict[str, Any]:
+    session = await _store.get_session(session_id, student_id)
     if session is None:
         raise HTTPException(
             status_code=404,
@@ -727,7 +1074,7 @@ async def configure_exam(
         "special_instructions": request.special_instructions.strip(),
         "created_at": _now_iso(),
     }
-    _exam_configs[config_id] = record
+    await _store.save_exam_config(record)
     return ConfigureExamResponse(**record)
 
 
@@ -735,28 +1082,26 @@ async def configure_exam(
 async def list_exam_configs() -> list[ConfigureExamResponse]:
     return [
         ConfigureExamResponse(**config)
-        for config in sorted(
-            _exam_configs.values(),
-            key=lambda c: c["created_at"],
-            reverse=True,
-        )
+        for config in await _store.list_exam_configs()
     ]
 
 
 @app.get("/api/exam-results", response_model=ExamResultsResponse)
 async def exam_results() -> ExamResultsResponse:
+    completed_exams = await _store.list_completed_exams()
     return ExamResultsResponse(
-        exams=[FinishExamResponse(**exam) for exam in _completed_exams]
+        exams=[FinishExamResponse(**exam) for exam in completed_exams]
     )
 
 
 @app.get("/api/exam-analytics", response_model=ExamAnalyticsResponse)
 async def exam_analytics() -> ExamAnalyticsResponse:
-    composite_scores = [_effective_composite_score(exam) for exam in _completed_exams]
-    total_questions = sum(len(exam.get("questions", [])) for exam in _completed_exams)
+    completed_exams = await _store.list_completed_exams()
+    composite_scores = [_effective_composite_score(exam) for exam in completed_exams]
+    total_questions = sum(len(exam.get("questions", [])) for exam in completed_exams)
     total_time = sum(
         float(question["time_spent_seconds"])
-        for exam in _completed_exams
+        for exam in completed_exams
         for question in exam.get("questions", [])
     )
 
@@ -782,7 +1127,7 @@ async def exam_analytics() -> ExamAnalyticsResponse:
     topics_by_index: dict[int, Counter[str]] = defaultdict(Counter)
     disputed_by_question: dict[str, dict[str, Any]] = {}
 
-    for exam in _completed_exams:
+    for exam in completed_exams:
         for question in exam.get("questions", []):
             index = int(question["question_index"])
             scores_by_index[index].append(_effective_question_score(question))
@@ -865,14 +1210,14 @@ async def exam_analytics() -> ExamAnalyticsResponse:
             ),
         )
         for exam in sorted(
-            _completed_exams,
+            completed_exams,
             key=lambda item: item["completed_at"],
             reverse=True,
         )
     ]
 
     return ExamAnalyticsResponse(
-        completed_sessions=len(_completed_exams),
+        completed_sessions=len(completed_exams),
         overall_average_score=(
             _round_one(sum(composite_scores) / len(composite_scores))
             if composite_scores
@@ -885,6 +1230,97 @@ async def exam_analytics() -> ExamAnalyticsResponse:
         per_question_average_scores=per_question,
         most_disputed_questions=most_disputed,
         sessions=sessions,
+    )
+
+
+@app.get("/api/student/history", response_model=StudentHistoryResponse)
+async def student_history(
+    student_id: str = Query(min_length=1),
+) -> StudentHistoryResponse:
+    student = await _store.get_student(student_id)
+    if student is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Student {student_id!r} not found.",
+        )
+
+    exams = sorted(
+        await _store.list_student_completed_exams(student_id),
+        key=lambda item: item["completed_at"],
+        reverse=True,
+    )
+    chronological_scores = [
+        _effective_composite_score(exam)
+        for exam in sorted(exams, key=lambda item: item["completed_at"])
+    ]
+
+    if chronological_scores:
+        average_score = _round_one(sum(chronological_scores) / len(chronological_scores))
+    else:
+        average_score = 0.0
+
+    if len(chronological_scores) < 2:
+        first_half_average = 0.0
+        second_half_average = 0.0
+        trend: Literal["up", "down", "flat", "insufficient_data"] = "insufficient_data"
+    else:
+        midpoint = len(chronological_scores) // 2
+        first_half = chronological_scores[:midpoint]
+        second_half = chronological_scores[midpoint:]
+        first_half_average = _round_one(sum(first_half) / len(first_half))
+        second_half_average = _round_one(sum(second_half) / len(second_half))
+        delta = second_half_average - first_half_average
+        if abs(delta) < 1:
+            trend = "flat"
+        elif delta > 0:
+            trend = "up"
+        else:
+            trend = "down"
+
+    history_sessions = [
+        StudentHistorySession(
+            session_id=exam["session_id"],
+            domain=exam["domain"],
+            difficulty=exam["difficulty"],
+            grade_level=exam["grade_level"],
+            completed_at=exam["completed_at"],
+            num_questions=exam["num_questions"],
+            composite_score=_effective_composite_score(exam),
+            questions=[
+                StudentHistoryQuestion(
+                    question_index=question["question_index"],
+                    topic=question["topic"],
+                    question=question["question"],
+                    overall_score=question["overall_score"],
+                    effective_score=_effective_question_score(question),
+                    grading_explanation=question["grading_explanation"],
+                    criterion_scores=[
+                        CriterionScore(**score)
+                        for score in question["criterion_scores"]
+                    ],
+                    dispute_result=(
+                        GradeDisputeResponse(**question["dispute_result"])
+                        if question.get("dispute_result")
+                        else None
+                    ),
+                )
+                for question in exam.get("questions", [])
+            ],
+        )
+        for exam in exams
+    ]
+
+    return StudentHistoryResponse(
+        student_id=student_id,
+        student_name=student["name"],
+        summary=StudentProgressSummary(
+            total_exams=len(exams),
+            average_score=average_score,
+            trend=trend,
+            first_half_average=first_half_average,
+            second_half_average=second_half_average,
+        ),
+        sessions=history_sessions,
     )
 
 
@@ -901,9 +1337,20 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
     grade_level: GradeLevel = request.grade_level
     grading_personality: GradingPersonality = request.grading_personality
     teacher_name = request.teacher_name
+    student_id = request.student_id
+    student_name = request.student_name
+
+    if student_id:
+        student = await _store.get_student(student_id)
+        if student is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Student {student_id!r} not found.",
+            )
+        student_name = student["name"]
 
     if request.config_id is not None:
-        config = _exam_configs.get(request.config_id)
+        config = await _store.get_exam_config(request.config_id)
         if config is None:
             raise HTTPException(
                 status_code=404,
@@ -919,9 +1366,10 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
         special_instructions = config["special_instructions"]
 
     session_id = uuid.uuid4().hex
-    _exam_sessions[session_id] = {
+    await _store.create_session({
         "session_id": session_id,
-        "student_name": request.student_name,
+        "student_id": student_id,
+        "student_name": student_name,
         "domain": domain,
         "difficulty": difficulty,
         "grade_level": grade_level,
@@ -936,11 +1384,12 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
         "tutor_sessions": {},  # question index string -> list[dict]
         "status": "in_progress",
         "created_at": _now_iso(),
-    }
+    })
 
     return StartExamResponse(
         session_id=session_id,
-        student_name=request.student_name,
+        student_id=student_id,
+        student_name=student_name,
         domain=domain,
         difficulty=difficulty,
         grade_level=grade_level,
@@ -963,7 +1412,7 @@ def _covered_topics(session: dict[str, Any]) -> list[str]:
 async def generate_question(
     request: GenerateQuestionRequest,
 ) -> GenerateQuestionResponse:
-    session = _require_session(request.session_id)
+    session = await _require_session(request.session_id, request.student_id)
 
     if session["status"] == "completed":
         raise HTTPException(
@@ -1063,7 +1512,7 @@ async def generate_question(
         "question": generated.question.strip(),
         "grading_rubric": [r.strip() for r in generated.grading_rubric if r.strip()],
     }
-    session["pending_question"] = pending
+    await _store.set_pending_question(request.session_id, pending)
 
     return GenerateQuestionResponse(
         background_info=pending["background_info"],
@@ -1108,7 +1557,7 @@ def _align_criterion_scores(
 
 @app.post("/api/grade-answer", response_model=GradeAnswerResponse)
 async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
-    session = _require_session(request.session_id)
+    session = await _require_session(request.session_id, request.student_id)
 
     if session["status"] == "completed":
         raise HTTPException(
@@ -1211,8 +1660,7 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
         ),
         "dispute_result": None,
     }
-    session["questions"].append(record)
-    session["pending_question"] = None
+    await _store.insert_question(request.session_id, record)
 
     return GradeAnswerResponse(
         criterion_scores=aligned_scores,
@@ -1224,7 +1672,7 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
 
 @app.post("/api/dispute-grade", response_model=GradeDisputeResponse)
 async def dispute_grade(request: GradeDisputeRequest) -> GradeDisputeResponse:
-    session = _require_session(request.session_id)
+    session = await _require_session(request.session_id, request.student_id)
 
     if request.question_index >= len(session["questions"]):
         raise HTTPException(
@@ -1301,21 +1749,19 @@ async def dispute_grade(request: GradeDisputeRequest) -> GradeDisputeResponse:
         reviewer_explanation=decision.reviewer_explanation.strip(),
     )
 
-    question["dispute_result"] = result.model_dump()
-
-    completed_exam = _find_completed_exam(request.session_id)
-    if completed_exam is not None:
-        for completed_question in completed_exam.get("questions", []):
-            if completed_question["question_index"] == request.question_index:
-                completed_question["dispute_result"] = result.model_dump()
-                break
+    await _store.save_dispute(
+        request.session_id,
+        request.question_index,
+        request.dispute_argument,
+        result.model_dump(),
+    )
 
     return result
 
 
 @app.post("/api/finish-exam", response_model=FinishExamResponse)
 async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
-    session = _require_session(request.session_id)
+    session = await _require_session(request.session_id, request.student_id)
 
     if not session["questions"]:
         raise HTTPException(
@@ -1422,6 +1868,7 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
 
     result = FinishExamResponse(
         session_id=session["session_id"],
+        student_id=session.get("student_id"),
         student_name=session["student_name"],
         domain=session["domain"],
         difficulty=difficulty,
@@ -1439,15 +1886,14 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
         completed_at=completed_at,
     )
 
-    session["status"] = "completed"
-    _completed_exams.append(result.model_dump())
+    await _store.complete_session(request.session_id, result.model_dump())
 
     return result
 
 
 @app.post("/api/tutor-session", response_model=TutorSessionResponse)
 async def tutor_session(request: TutorSessionRequest) -> TutorSessionResponse:
-    session = _require_session(request.session_id)
+    session = await _require_session(request.session_id, request.student_id)
 
     if request.question_index >= len(session["questions"]):
         raise HTTPException(
@@ -1535,6 +1981,11 @@ async def tutor_session(request: TutorSessionRequest) -> TutorSessionResponse:
             "content": tutor_turn.message.strip(),
             "created_at": _now_iso(),
         }
+    )
+    await _store.save_tutor_messages(
+        request.session_id,
+        request.question_index,
+        history,
     )
 
     return TutorSessionResponse(

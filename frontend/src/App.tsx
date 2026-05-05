@@ -28,6 +28,7 @@ interface ExamConfig {
 interface StartExamResponse {
   session_id: string
   student_name: string
+  student_id?: string | null
   domain: string
   difficulty: Difficulty
   grade_level: GradeLevel
@@ -82,6 +83,7 @@ interface QuestionReport {
 interface FinishExamResponse {
   session_id: string
   student_name: string
+  student_id?: string | null
   domain: string
   difficulty: Difficulty
   grade_level: GradeLevel
@@ -151,6 +153,50 @@ interface TutorSessionResponse {
   messages: TutorMessage[]
 }
 
+interface StudentProfile {
+  student_id: string
+  name: string
+  email: string
+  created_at: string
+}
+
+interface StudentHistoryQuestion {
+  question_index: number
+  topic: string
+  question: string
+  overall_score: number
+  effective_score: number
+  grading_explanation: string
+  criterion_scores: CriterionScore[]
+  dispute_result?: GradeDisputeResponse | null
+}
+
+interface StudentHistorySession {
+  session_id: string
+  domain: string
+  difficulty: Difficulty
+  grade_level: GradeLevel
+  completed_at: string
+  num_questions: number
+  composite_score: number
+  questions: StudentHistoryQuestion[]
+}
+
+interface StudentProgressSummary {
+  total_exams: number
+  average_score: number
+  trend: 'up' | 'down' | 'flat' | 'insufficient_data'
+  first_half_average: number
+  second_half_average: number
+}
+
+interface StudentHistoryResponse {
+  student_id: string
+  student_name: string
+  summary: StudentProgressSummary
+  sessions: StudentHistorySession[]
+}
+
 // ── API helpers ──────────────────────────────────────────────────────────────
 
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
@@ -173,6 +219,28 @@ async function apiGet<T>(path: string): Promise<T> {
     throw new Error(payload?.detail || `Server error (${res.status})`)
   }
   return res.json()
+}
+
+const STUDENT_STORAGE_KEY = 'exam-bureau-student'
+
+function loadStoredStudent(): StudentProfile | null {
+  try {
+    const raw = window.localStorage.getItem(STUDENT_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as StudentProfile
+    if (!parsed.student_id || !parsed.email || !parsed.name) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function storeStudent(student: StudentProfile | null) {
+  if (student) {
+    window.localStorage.setItem(STUDENT_STORAGE_KEY, JSON.stringify(student))
+  } else {
+    window.localStorage.removeItem(STUDENT_STORAGE_KEY)
+  }
 }
 
 // ── Tiny router (pathname + history API) ─────────────────────────────────────
@@ -403,7 +471,15 @@ function ErrorBanner({ message }: { message: string }) {
 
 // ── Landing ──────────────────────────────────────────────────────────────────
 
-function Landing({ navigate }: { navigate: (path: string) => void }) {
+function Landing({
+  navigate,
+  student,
+  onLogout,
+}: {
+  navigate: (path: string) => void
+  student: StudentProfile | null
+  onLogout: () => void
+}) {
   const today = useMemo(
     () =>
       new Date().toLocaleDateString('en-GB', {
@@ -422,7 +498,7 @@ function Landing({ navigate }: { navigate: (path: string) => void }) {
         <button
           type="button"
           className="door rise delay-2"
-          onClick={() => navigate('/student')}
+          onClick={() => navigate(student ? '/student' : '/login')}
         >
           <span className="door-number">Entrance I — Candidate</span>
           <span className="door-title">
@@ -458,6 +534,24 @@ function Landing({ navigate }: { navigate: (path: string) => void }) {
         </button>
       </div>
 
+      <div className="mt-8 flex flex-wrap items-center justify-between gap-4">
+        {student ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="chip">Signed in as {student.name}</span>
+            <button type="button" className="btn-ghost" onClick={() => navigate('/student/history')}>
+              Exam History
+            </button>
+            <button type="button" className="btn-ghost" onClick={onLogout}>
+              Sign Out
+            </button>
+          </div>
+        ) : (
+          <button type="button" className="btn-ghost" onClick={() => navigate('/login')}>
+            Student Login
+          </button>
+        )}
+      </div>
+
       <div className="mt-20 rise delay-4 flex flex-wrap items-center justify-between gap-6 font-mono text-xs uppercase tracking-[0.25em] text-ink-soft">
         <div className="flex items-center gap-3">
           <Stamp>Certified</Stamp>
@@ -465,6 +559,95 @@ function Landing({ navigate }: { navigate: (path: string) => void }) {
         </div>
         <div>PAPER · QUILL · INK</div>
       </div>
+    </div>
+  )
+}
+
+// ── Student login ────────────────────────────────────────────────────────────
+
+function StudentLogin({
+  navigate,
+  onLogin,
+}: {
+  navigate: (path: string) => void
+  onLogin: (student: StudentProfile) => void
+}) {
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+    try {
+      const student = await apiPost<StudentProfile>('/api/auth/login', {
+        name: name.trim(),
+        email: email.trim(),
+      })
+      onLogin(student)
+      const currentStudentPath = window.location.pathname.startsWith('/student')
+        ? `${window.location.pathname}${window.location.search}`
+        : null
+      navigate(currentStudentPath || new URLSearchParams(window.location.search).get('next') || '/student')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not sign you in.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-12">
+      <BackLink onClick={() => navigate('/')} label="Back to foyer" />
+
+      <h1 className="mt-6 font-display text-5xl md:text-6xl leading-[0.95]">
+        Candidate <span className="serif-italic">ledger.</span>
+      </h1>
+      <p className="mt-3 font-serif text-ink-soft">
+        Enter your name and email to create an account or reopen your record.
+      </p>
+
+      <form onSubmit={handleSubmit} className="paper paper-margin mt-10 p-8 md:p-10 space-y-8 rise">
+        <div>
+          <label className="field-label" htmlFor="login-name">Name</label>
+          <input
+            id="login-name"
+            type="text"
+            required
+            maxLength={120}
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Jane Doe"
+            className="input-field mt-2"
+          />
+        </div>
+        <div>
+          <label className="field-label" htmlFor="login-email">Email</label>
+          <input
+            id="login-email"
+            type="email"
+            required
+            maxLength={320}
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="jane@example.edu"
+            className="input-field mt-2"
+          />
+        </div>
+
+        {error && <ErrorBanner message={error} />}
+
+        <div className="flex items-center justify-between">
+          <span className="font-mono text-xs uppercase tracking-[0.22em] text-ink-soft">
+            Email identifies your exam archive.
+          </span>
+          <button type="submit" disabled={loading || !name.trim() || !email.trim()} className="btn-primary">
+            {loading ? 'Signing in…' : 'Enter the hall →'}
+          </button>
+        </div>
+      </form>
     </div>
   )
 }
@@ -707,7 +890,7 @@ function TeacherConfigure({ navigate }: { navigate: (p: string) => void }) {
 
           <div className="flex items-center justify-between">
             <span className="font-mono text-xs uppercase tracking-[0.22em] text-ink-soft">
-              Config saved in volatile memory
+              Config saved to Convex
             </span>
             <button type="submit" disabled={loading || !domain.trim()} className="btn-primary">
               {loading ? 'Filing…' : 'File exam →'}
@@ -848,7 +1031,7 @@ function TeacherDashboard({ navigate }: { navigate: (p: string) => void }) {
             Exam <span className="serif-italic">analytics.</span>
           </h1>
           <p className="mt-3 font-serif text-ink-soft">
-            Aggregate results from completed sessions in memory.
+            Aggregate results from completed Convex-backed sessions.
           </p>
         </div>
         <button className="btn-ghost" onClick={() => navigate('/teacher/results')}>
@@ -998,10 +1181,12 @@ function TeacherDashboard({ navigate }: { navigate: (p: string) => void }) {
 
 function StudentSetup({
   navigate,
+  student,
   initialConfigId,
   onStarted,
 }: {
   navigate: (p: string) => void
+  student: StudentProfile
   initialConfigId: string | null
   onStarted: (config: {
     session: StartExamResponse
@@ -1010,7 +1195,6 @@ function StudentSetup({
 }) {
   const [configs, setConfigs] = useState<ExamConfig[] | null>(null)
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialConfigId)
-  const [studentName, setStudentName] = useState('')
   const [domain, setDomain] = useState('')
   const [difficulty, setDifficulty] = useState<Difficulty>('medium')
   const [gradeLevel, setGradeLevel] = useState<GradeLevel>('Undergraduate')
@@ -1080,7 +1264,8 @@ function StudentSetup({
         grading_personality: gradingPersonality,
         teacher_name: teacherName,
         topics,
-        student_name: studentName.trim() || 'Anonymous Student',
+        student_id: student.student_id,
+        student_name: student.name,
         config_id: selectedConfigId,
       })
       onStarted({ session, totalQuestions: session.num_questions })
@@ -1099,21 +1284,18 @@ function StudentSetup({
         Candidate <span className="serif-italic">registration.</span>
       </h1>
       <p className="mt-3 font-serif text-ink-soft">
-        Sign the roll, pick an exam, and commence.
+        Pick an exam and commence. Your work will be filed under {student.name}.
       </p>
 
       <form onSubmit={handleStart} className="paper paper-margin mt-10 p-8 md:p-10 space-y-8 rise">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <div>
-            <label className="field-label" htmlFor="student-name">Your name</label>
-            <input
-              id="student-name"
-              type="text"
-              value={studentName}
-              onChange={e => setStudentName(e.target.value)}
-              placeholder="Jane Doe"
-              className="input-field mt-2"
-            />
+          <div className="border border-ink/15 p-4">
+            <div className="field-label">Candidate</div>
+            <div className="mt-2 font-display text-3xl">{student.name}</div>
+            <div className="mt-1 font-mono text-xs text-ink-soft">{student.email}</div>
+            <button type="button" className="btn-ghost mt-4" onClick={() => navigate('/student/history')}>
+              View history
+            </button>
           </div>
           <div>
             <label className="field-label" htmlFor="config">Exam script</label>
@@ -1214,12 +1396,14 @@ type ExamPhase =
 
 function StudentExam({
   session,
+  student,
   totalQuestions,
   onExit,
   onFinished,
   onStudy,
 }: {
   session: StartExamResponse
+  student: StudentProfile
   totalQuestions: number
   onExit: () => void
   onFinished: (report: FinishExamResponse) => void
@@ -1231,8 +1415,9 @@ function StudentExam({
   const requestQuestion = useCallback(() => {
     return apiPost<GenerateQuestionResponse>('/api/generate-question', {
         session_id: session.session_id,
+        student_id: student.student_id,
       })
-  }, [session.session_id])
+  }, [session.session_id, student.student_id])
 
   const fetchNextQuestion = useCallback(async () => {
     setPhase({ kind: 'loading-question' })
@@ -1276,6 +1461,7 @@ function StudentExam({
       try {
         const grade = await apiPost<GradeAnswerResponse>('/api/grade-answer', {
           session_id: session.session_id,
+          student_id: student.student_id,
           student_answer: answer,
           time_spent_seconds: elapsed,
         })
@@ -1289,7 +1475,7 @@ function StudentExam({
         })
       }
     },
-    [session.session_id],
+    [session.session_id, student.student_id],
   )
 
   const handleFinish = useCallback(async () => {
@@ -1297,6 +1483,7 @@ function StudentExam({
     try {
       const report = await apiPost<FinishExamResponse>('/api/finish-exam', {
         session_id: session.session_id,
+        student_id: student.student_id,
       })
       setPhase({ kind: 'finished', report })
       onFinished(report)
@@ -1307,7 +1494,7 @@ function StudentExam({
         retryable: false,
       })
     }
-  }, [onFinished, session.session_id])
+  }, [onFinished, session.session_id, student.student_id])
 
   const progressText = `Q. ${String(Math.min(answeredCount + 1, totalQuestions)).padStart(2, '0')} / ${String(totalQuestions).padStart(2, '0')}`
 
@@ -1355,6 +1542,7 @@ function StudentExam({
         {phase.kind === 'finished' && (
           <ExamReport
             report={phase.report}
+            student={student}
             onClose={onExit}
             closeLabel="Return to foyer"
             allowDisputes
@@ -1575,6 +1763,7 @@ function ReviewPaper({
 
 function ExamReport({
   report,
+  student,
   onClose,
   closeLabel,
   allowDisputes = false,
@@ -1582,6 +1771,7 @@ function ExamReport({
   onStudy,
 }: {
   report: FinishExamResponse
+  student?: StudentProfile | null
   onClose: () => void
   closeLabel: string
   allowDisputes?: boolean
@@ -1606,6 +1796,7 @@ function ExamReport({
     try {
       const result = await apiPost<GradeDisputeResponse>('/api/dispute-grade', {
         session_id: displayReport.session_id,
+        student_id: student?.student_id,
         question_index: question.question_index,
         dispute_argument: disputeDraft.trim(),
       })
@@ -1805,15 +1996,178 @@ function ExamReport({
   )
 }
 
+// ── Student history ──────────────────────────────────────────────────────────
+
+function StudentHistoryPage({
+  student,
+  navigate,
+}: {
+  student: StudentProfile
+  navigate: (path: string) => void
+}) {
+  const [history, setHistory] = useState<StudentHistoryResponse | null>(null)
+  const [openSessionId, setOpenSessionId] = useState<string | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    const params = new URLSearchParams({ student_id: student.student_id })
+    apiGet<StudentHistoryResponse>(`/api/student/history?${params.toString()}`)
+      .then(data => {
+        if (alive) setHistory(data)
+      })
+      .catch(err => {
+        if (alive) setError(err instanceof Error ? err.message : 'Could not load exam history.')
+      })
+    return () => {
+      alive = false
+    }
+  }, [student.student_id])
+
+  const trendLabel = history?.summary.trend === 'insufficient_data'
+    ? 'Not enough data'
+    : history?.summary.trend === 'up'
+      ? 'Trending up'
+      : history?.summary.trend === 'down'
+        ? 'Trending down'
+        : 'Holding steady'
+
+  return (
+    <div className="mx-auto max-w-5xl px-6 py-12">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <BackLink onClick={() => navigate('/student')} label="Back to exam hall" />
+        <span className="chip">{student.name}</span>
+      </div>
+
+      <h1 className="mt-6 font-display text-5xl md:text-6xl leading-[0.95]">
+        Exam <span className="serif-italic">history.</span>
+      </h1>
+
+      {error && <div className="mt-8"><ErrorBanner message={error} /></div>}
+      {!history && !error && <LoadingPaper headline="Retrieving your filed papers…" />}
+
+      {history && (
+        <div className="mt-10 space-y-8">
+          <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="paper paper-margin p-6">
+              <div className="field-label">Exams taken</div>
+              <div className="mt-3 font-display text-5xl">{history.summary.total_exams}</div>
+            </div>
+            <div className="paper paper-margin p-6">
+              <div className="field-label">Average score</div>
+              <div className={'mt-3 font-display text-5xl ' + scoreClass(history.summary.average_score)}>
+                {history.summary.average_score}
+              </div>
+            </div>
+            <div className="paper paper-margin p-6">
+              <div className="field-label">Progress</div>
+              <div className="mt-3 font-display text-3xl">{trendLabel}</div>
+              {history.summary.trend !== 'insufficient_data' && (
+                <div className="mt-2 font-mono text-xs uppercase tracking-[0.18em] text-ink-soft">
+                  {history.summary.first_half_average} → {history.summary.second_half_average}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {history.sessions.length === 0 && (
+            <div className="paper paper-margin p-8">
+              <div className="field-label">No completed exams</div>
+              <p className="mt-3 font-serif text-ink-soft">
+                Completed exams will appear here after your first composite grade is filed.
+              </p>
+            </div>
+          )}
+
+          <section className="space-y-4">
+            {history.sessions.map(session => {
+              const open = openSessionId === session.session_id
+              return (
+                <div key={session.session_id} className="paper paper-margin p-5 md:p-6">
+                  <button
+                    type="button"
+                    className="w-full text-left"
+                    onClick={() => setOpenSessionId(open ? null : session.session_id)}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div>
+                        <div className="font-mono text-xs uppercase tracking-[0.22em] text-ink-soft">
+                          {new Date(session.completed_at).toLocaleString()}
+                        </div>
+                        <h2 className="mt-2 font-display text-3xl">{session.domain}</h2>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <span className="chip">{session.difficulty}</span>
+                          <span className="chip">{session.grade_level}</span>
+                          <span className="chip">{session.num_questions} question{session.num_questions === 1 ? '' : 's'}</span>
+                        </div>
+                      </div>
+                      <div className={'font-display text-5xl ' + scoreClass(session.composite_score)}>
+                        {session.composite_score}
+                      </div>
+                    </div>
+                  </button>
+
+                  {open && (
+                    <div className="mt-6 space-y-4">
+                      {session.questions.map(question => (
+                        <div key={question.question_index} className="border border-ink/15 p-4">
+                          <div className="flex flex-wrap items-start justify-between gap-4">
+                            <div>
+                              <div className="font-mono text-xs uppercase tracking-[0.22em] text-oxblood">
+                                Q{question.question_index + 1} · {question.topic}
+                              </div>
+                              <p className="mt-2 font-serif text-lg leading-relaxed">{question.question}</p>
+                            </div>
+                            <div className={'font-display text-4xl ' + scoreClass(question.effective_score)}>
+                              {question.effective_score}
+                            </div>
+                          </div>
+                          <p className="mt-3 font-serif text-ink-soft leading-relaxed whitespace-pre-line">
+                            {question.grading_explanation}
+                          </p>
+                          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {question.criterion_scores.map((score, index) => (
+                              <div key={index} className="border border-ink/10 p-3">
+                                <div className="field-label">{score.criterion}</div>
+                                <div className={'mt-1 font-display text-2xl ' + scoreClass(score.score)}>
+                                  {score.score}
+                                </div>
+                                <p className="mt-1 font-serif text-sm text-ink-soft">{score.feedback}</p>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-3 font-mono text-xs uppercase tracking-[0.18em] text-ink-soft">
+                            {question.dispute_result
+                              ? question.dispute_result.dispute_accepted
+                                ? `Dispute accepted · revised from ${question.dispute_result.original_score}`
+                                : 'Dispute filed · original score upheld'
+                              : 'No dispute filed'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </section>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Tutor ────────────────────────────────────────────────────────────────────
 
 function TutorPage({
   sessionId,
   questionIndex,
+  student,
   onDone,
 }: {
   sessionId: string | null
   questionIndex: number | null
+  student: StudentProfile | null
   onDone: () => void
 }) {
   const [messages, setMessages] = useState<TutorMessage[]>([])
@@ -1831,6 +2185,7 @@ function TutorPage({
       try {
         const response = await apiPost<TutorSessionResponse>('/api/tutor-session', {
           session_id: sessionId,
+          student_id: student?.student_id,
           question_index: questionIndex,
           message,
         })
@@ -1842,7 +2197,7 @@ function TutorPage({
         setLoading(false)
       }
     },
-    [questionIndex, sessionId],
+    [questionIndex, sessionId, student?.student_id],
   )
 
   useEffect(() => {
@@ -1936,9 +2291,24 @@ function BackLink({ onClick, label }: { onClick: () => void; label: string }) {
 export default function App() {
   const [pathname, navigate] = useRoute()
 
+  const [student, setStudent] = useState<StudentProfile | null>(() => loadStoredStudent())
   const [examSession, setExamSession] = useState<StartExamResponse | null>(null)
   const [finishedReport, setFinishedReport] = useState<FinishExamResponse | null>(null)
   const [tutorTarget, setTutorTarget] = useState<{ sessionId: string; questionIndex: number } | null>(null)
+
+  function handleLogin(nextStudent: StudentProfile) {
+    setStudent(nextStudent)
+    storeStudent(nextStudent)
+  }
+
+  function handleLogout() {
+    setStudent(null)
+    storeStudent(null)
+    setExamSession(null)
+    setFinishedReport(null)
+    setTutorTarget(null)
+    navigate('/')
+  }
 
   function exitExam() {
     setExamSession(null)
@@ -1969,7 +2339,8 @@ export default function App() {
 
   return (
     <div className="min-h-screen page-surface">
-      {pathname === '/' && <Landing navigate={navigate} />}
+      {pathname === '/' && <Landing navigate={navigate} student={student} onLogout={handleLogout} />}
+      {pathname === '/login' && <StudentLogin navigate={navigate} onLogin={handleLogin} />}
 
       {pathname === '/teacher' && <TeacherHome navigate={navigate} />}
       {pathname === '/teacher/configure' && <TeacherConfigure navigate={navigate} />}
@@ -1980,6 +2351,7 @@ export default function App() {
         <div className="mx-auto max-w-3xl px-6 py-10">
           <ExamReport
             report={finishedReport}
+            student={student}
             onClose={exitExam}
             closeLabel="Return to foyer"
             allowDisputes
@@ -1989,9 +2361,18 @@ export default function App() {
         </div>
       )}
 
-      {pathname.startsWith('/student') && pathname !== '/student/results' && !examSession && (
+      {pathname.startsWith('/student') && !student && (
+        <StudentLogin navigate={navigate} onLogin={handleLogin} />
+      )}
+
+      {pathname === '/student/history' && student && (
+        <StudentHistoryPage student={student} navigate={navigate} />
+      )}
+
+      {pathname.startsWith('/student') && pathname !== '/student/results' && pathname !== '/student/history' && student && !examSession && (
         <StudentSetup
           navigate={navigate}
+          student={student}
           initialConfigId={new URLSearchParams(window.location.search).get('config')}
           onStarted={({ session }) => {
             setFinishedReport(null)
@@ -2000,9 +2381,10 @@ export default function App() {
           }}
         />
       )}
-      {pathname.startsWith('/student') && pathname !== '/student/results' && examSession && (
+      {pathname.startsWith('/student') && pathname !== '/student/results' && pathname !== '/student/history' && student && examSession && (
         <StudentExam
           session={examSession}
+          student={student}
           totalQuestions={examSession.num_questions}
           onExit={exitExam}
           onFinished={setFinishedReport}
@@ -2014,12 +2396,13 @@ export default function App() {
         <TutorPage
           sessionId={tutorSessionId}
           questionIndex={hasTutorQuestion ? tutorQuestionIndex : null}
+          student={student}
           onDone={doneStudying}
         />
       )}
 
-      {!['/', '/teacher', '/teacher/configure', '/teacher/dashboard', '/teacher/results', '/tutor', '/student/results'].includes(pathname) &&
-        !pathname.startsWith('/student') && <Landing navigate={navigate} />}
+      {!['/', '/login', '/teacher', '/teacher/configure', '/teacher/dashboard', '/teacher/results', '/tutor', '/student/results', '/student/history'].includes(pathname) &&
+        !pathname.startsWith('/student') && <Landing navigate={navigate} student={student} onLogout={handleLogout} />}
     </div>
   )
 }
