@@ -38,6 +38,21 @@ const pendingQuestion = v.object({
   background_info: v.string(),
   question: v.string(),
   grading_rubric: v.array(v.string()),
+  difficulty: v.optional(difficulty),
+  source_chunk_id: v.optional(v.union(v.string(), v.null())),
+  source_label: v.optional(v.union(v.string(), v.null())),
+});
+
+const knowledgeMapEntry = v.object({
+  topic: v.string(),
+  mastery_level: v.union(
+    v.literal("Not Yet"),
+    v.literal("Developing"),
+    v.literal("Proficient"),
+    v.literal("Mastered"),
+  ),
+  average_score: v.number(),
+  summary: v.string(),
 });
 
 export default defineSchema({
@@ -64,12 +79,27 @@ export default defineSchema({
     created_at: v.string(),
   }).index("by_config_id", ["config_id"]),
 
+  material_chunks: defineTable({
+    chunk_id: v.string(),
+    config_id: v.string(),
+    source_filename: v.string(),
+    source_type: v.union(v.literal("pdf"), v.literal("pptx")),
+    source_label: v.string(),
+    chunk_index: v.number(),
+    text: v.string(),
+    created_at: v.string(),
+    updated_at: v.string(),
+  })
+    .index("by_chunk_id", ["chunk_id"])
+    .index("by_config", ["config_id"]),
+
   sessions: defineTable({
     session_id: v.string(),
     student_id: v.optional(v.union(v.string(), v.null())),
     student_name: v.string(),
     domain: v.string(),
     difficulty,
+    current_difficulty: v.optional(difficulty),
     grade_level: gradeLevel,
     grading_personality: gradingPersonality,
     teacher_name: v.string(),
@@ -78,6 +108,10 @@ export default defineSchema({
     config_id: v.optional(v.union(v.string(), v.null())),
     special_instructions: v.string(),
     pending_question: v.optional(v.union(pendingQuestion, v.null())),
+    proctoring_status: v.optional(
+      v.union(v.literal("pending"), v.literal("active"), v.literal("unproctored")),
+    ),
+    knowledge_map: v.optional(v.array(knowledgeMapEntry)),
     status: v.union(v.literal("in_progress"), v.literal("completed")),
     composite_score: v.optional(v.number()),
     composite_feedback: v.optional(v.string()),
@@ -101,6 +135,9 @@ export default defineSchema({
     criterion_scores: v.array(criterionScore),
     overall_score: v.number(),
     grading_explanation: v.string(),
+    difficulty: v.optional(difficulty),
+    source_chunk_id: v.optional(v.union(v.string(), v.null())),
+    source_label: v.optional(v.union(v.string(), v.null())),
     created_at: v.string(),
   })
     .index("by_session", ["session_id"])
@@ -123,5 +160,17 @@ export default defineSchema({
     updated_at: v.string(),
   })
     .index("by_session_question", ["session_id", "question_index"])
+    .index("by_session", ["session_id"]),
+
+  proctor_snapshots: defineTable({
+    snapshot_id: v.string(),
+    session_id: v.string(),
+    captured_at: v.string(),
+    flags: v.array(v.string()),
+    confidence: v.number(),
+    description: v.string(),
+    image_data_url: v.string(),
+  })
+    .index("by_snapshot_id", ["snapshot_id"])
     .index("by_session", ["session_id"]),
 });

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from typing import Any
+from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
+from pptx import Presentation
 
 from app import main
 
@@ -15,6 +17,9 @@ def _clean_state() -> None:
     main._completed_exams.clear()
     main._students.clear()
     main._student_ids_by_email.clear()
+    main._material_chunks.clear()
+    main._material_chunk_ids_by_config.clear()
+    main._proctor_snapshots.clear()
 
 
 @pytest.fixture
@@ -547,3 +552,173 @@ def test_disputes_tutor_and_analytics_flow(
     assert analytics_body["sessions"][0]["composite_score"] == 86
     assert analytics_body["most_disputed_questions"][0]["accepted_disputes"] == 1
     assert analytics_body["per_question_average_scores"][0]["average_score"] == 85.0
+
+
+def test_advanced_material_proctoring_and_adaptive_flow(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grade_scores = [90, 92, 55, 50]
+    generated_prompts: list[str] = []
+
+    async def fake_call_together_json(**kwargs: Any) -> Any:
+        model = kwargs["response_model"]
+        user_content = kwargs["messages"][-1]["content"]
+        if model is main.LLMGeneratedQuestion:
+            generated_prompts.append(user_content)
+            index = len(generated_prompts)
+            return main.LLMGeneratedQuestion(
+                background_info=f"Lecture-derived context {index}.",
+                question=f"Explain lecture concept {index}?",
+                grading_rubric=["Uses lecture evidence"],
+                topic=f"Lecture Topic {index}",
+            )
+        if model is main.GradeAnswerResponse:
+            score = grade_scores.pop(0)
+            return main.GradeAnswerResponse(
+                criterion_scores=[
+                    main.CriterionScore(
+                        criterion="Uses lecture evidence",
+                        score=score,
+                        feedback="Tie the answer to the uploaded slide.",
+                    ),
+                ],
+                overall_score=score,
+                grading_explanation="Good lecture-specific answer.",
+                question_index=0,
+            )
+        if model is main.LLMComposite:
+            return main.LLMComposite(
+                composite_score=72,
+                composite_feedback="Composite feedback.",
+            )
+        if model is main.LLMKnowledgeMap:
+            return main.LLMKnowledgeMap(
+                topics=[
+                    main.KnowledgeMapEntry(
+                        topic="Lecture Topic",
+                        mastery_level="Proficient",
+                        average_score=72,
+                        summary="Understands the uploaded material unevenly.",
+                    )
+                ]
+            )
+        raise AssertionError(f"Unexpected response_model: {model}")
+
+    async def fake_call_together_vision_json(**kwargs: Any) -> Any:
+        return main.LLMProctorAnalysis(
+            flags=["looking_away", "phone_visible"],
+            confidence=0.82,
+            description="Student appears to look down with a phone visible.",
+        )
+
+    monkeypatch.setattr(main, "call_together_json", fake_call_together_json)
+    monkeypatch.setattr(main, "call_together_vision_json", fake_call_together_vision_json)
+
+    config = client.post(
+        "/api/configure-exam",
+        json={
+            "domain": "Cell Biology",
+            "topics": ["Mitochondria"],
+            "num_questions": 4,
+            "difficulty": "medium",
+        },
+    ).json()
+
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[5])
+    slide.shapes.title.text = "Mitochondria and ATP"
+    textbox = slide.shapes.add_textbox(0, 0, 5_000_000, 1_000_000)
+    textbox.text = "The lecture explains oxidative phosphorylation and ATP synthase."
+    buf = BytesIO()
+    deck.save(buf)
+    buf.seek(0)
+
+    upload = client.post(
+        "/api/upload-material",
+        data={"config_id": config["config_id"]},
+        files={
+            "file": (
+                "lecture.pptx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        },
+    )
+    assert upload.status_code == 200
+    chunks = upload.json()["chunks"]
+    assert chunks[0]["source_label"] == "Slide 1"
+    assert "oxidative phosphorylation" in chunks[0]["text"]
+
+    edit = client.patch(
+        "/api/material-chunk",
+        json={
+            "chunk_id": chunks[0]["chunk_id"],
+            "text": chunks[0]["text"] + " The example compares ATP synthase to a turbine.",
+        },
+    )
+    assert edit.status_code == 200
+
+    login = client.post(
+        "/api/auth/login",
+        json={"name": "Mara Voss", "email": "mara@example.edu"},
+    ).json()
+    start = client.post(
+        "/api/start-exam",
+        json={
+            "student_id": login["student_id"],
+            "domain": "Ignored",
+            "num_questions": 1,
+            "difficulty": "easy",
+            "config_id": config["config_id"],
+        },
+    ).json()
+    session_id = start["session_id"]
+
+    proctor = client.post(
+        "/api/proctor/analyze",
+        json={
+            "session_id": session_id,
+            "student_id": login["student_id"],
+            "image_data_url": "data:image/jpeg;base64," + ("a" * 64),
+        },
+    )
+    assert proctor.status_code == 200
+    assert proctor.json()["confidence"] == 0.82
+
+    seen_difficulties: list[str] = []
+    for _ in range(4):
+        question = client.post(
+            "/api/generate-question",
+            json={"session_id": session_id, "student_id": login["student_id"]},
+        )
+        assert question.status_code == 200
+        seen_difficulties.append(question.json()["difficulty"])
+        assert question.json()["source_label"] == "Slide 1"
+        grade = client.post(
+            "/api/grade-answer",
+            json={
+                "session_id": session_id,
+                "student_id": login["student_id"],
+                "student_answer": "This answer cites ATP synthase from the lecture.",
+                "time_spent_seconds": 45,
+            },
+        )
+        assert grade.status_code == 200
+
+    assert seen_difficulties == ["medium", "medium", "hard", "hard"]
+    assert "Uploaded material excerpts" in generated_prompts[0]
+
+    finish = client.post(
+        "/api/finish-exam",
+        json={"session_id": session_id, "student_id": login["student_id"]},
+    )
+    assert finish.status_code == 200
+    assert finish.json()["knowledge_map"][0]["mastery_level"] == "Proficient"
+
+    alerts = client.get("/api/proctor/alerts")
+    assert alerts.status_code == 200
+    assert alerts.json()["sessions"][0]["integrity_score"] == 75
+    assert alerts.json()["sessions"][0]["snapshots"][0]["flags"] == [
+        "looking_away",
+        "phone_visible",
+    ]

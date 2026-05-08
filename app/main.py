@@ -6,11 +6,12 @@ import re
 import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Any, Literal, Optional, TypeVar
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -23,6 +24,8 @@ ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 Difficulty = Literal["easy", "medium", "hard"]
 GradeLevel = Literal["Middle School", "High School", "Undergraduate", "Graduate"]
 GradingPersonality = Literal["Strict", "Balanced", "Encouraging"]
+MasteryLevel = Literal["Not Yet", "Developing", "Proficient", "Mastered"]
+ProctoringStatus = Literal["pending", "active", "unproctored"]
 
 
 # ── Difficulty guidance (shared by generation + grading) ─────────────────────
@@ -210,6 +213,41 @@ class ConfigureExamResponse(BaseModel):
     created_at: str
 
 
+class MaterialChunk(BaseModel):
+    chunk_id: str
+    config_id: str
+    source_filename: str
+    source_type: Literal["pdf", "pptx"]
+    source_label: str
+    chunk_index: int
+    text: str
+    created_at: str
+    updated_at: str
+
+
+class UploadMaterialResponse(BaseModel):
+    config_id: str
+    source_filename: str
+    chunks: list[MaterialChunk]
+
+
+class UpdateMaterialChunkRequest(BaseModel):
+    chunk_id: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=20000)
+
+    @field_validator("text")
+    @classmethod
+    def _clean_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("text must not be empty")
+        return cleaned
+
+
+class DeleteMaterialChunkRequest(BaseModel):
+    chunk_id: str = Field(min_length=1)
+
+
 class StartExamRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=200)
     num_questions: int = Field(ge=1, le=10)
@@ -256,6 +294,8 @@ class StartExamResponse(BaseModel):
     grading_personality: GradingPersonality
     teacher_name: str
     num_questions: int
+    current_difficulty: Difficulty
+    proctoring_status: ProctoringStatus = "pending"
 
 
 class GenerateQuestionRequest(BaseModel):
@@ -277,6 +317,9 @@ class GenerateQuestionResponse(BaseModel):
     )
     question_index: int = Field(ge=0)
     total_questions: int = Field(ge=1)
+    difficulty: Difficulty
+    source_chunk_id: Optional[str] = None
+    source_label: Optional[str] = None
 
 
 class LLMGeneratedQuestion(BaseModel):
@@ -312,6 +355,8 @@ class GradeAnswerResponse(BaseModel):
     overall_score: int = Field(ge=0, le=100)
     grading_explanation: str = Field(min_length=1)
     question_index: int = Field(ge=0)
+    current_difficulty: Optional[Difficulty] = None
+    next_difficulty: Optional[Difficulty] = None
 
 
 class GradeDisputeRequest(BaseModel):
@@ -358,6 +403,9 @@ class QuestionReport(BaseModel):
     overall_score: int
     grading_explanation: str
     time_spent_seconds: float
+    difficulty: Optional[Difficulty] = None
+    source_chunk_id: Optional[str] = None
+    source_label: Optional[str] = None
     dispute_result: Optional[GradeDisputeResponse] = None
 
 
@@ -376,11 +424,23 @@ class FinishExamResponse(BaseModel):
     composite_feedback: str
     total_time_seconds: float
     completed_at: str
+    knowledge_map: list["KnowledgeMapEntry"] = Field(default_factory=list)
 
 
 class LLMComposite(BaseModel):
     composite_score: int = Field(ge=0, le=100)
     composite_feedback: str = Field(min_length=1)
+
+
+class KnowledgeMapEntry(BaseModel):
+    topic: str
+    mastery_level: MasteryLevel
+    average_score: int = Field(ge=0, le=100)
+    summary: str = Field(min_length=1)
+
+
+class LLMKnowledgeMap(BaseModel):
+    topics: list[KnowledgeMapEntry]
 
 
 class ExamResultsResponse(BaseModel):
@@ -419,6 +479,14 @@ class AnalyticsSession(BaseModel):
     num_questions: int
     composite_score: int
     dispute_count: int
+    proctoring_status: ProctoringStatus = "pending"
+
+
+class AggregateKnowledgeMapEntry(BaseModel):
+    topic: str
+    average_score: float
+    mastery_level: MasteryLevel
+    attempts: int
 
 
 class ExamAnalyticsResponse(BaseModel):
@@ -429,6 +497,7 @@ class ExamAnalyticsResponse(BaseModel):
     per_question_average_scores: list[PerQuestionAnalytics]
     most_disputed_questions: list[DisputedQuestionAnalytics]
     sessions: list[AnalyticsSession]
+    aggregate_knowledge_map: list[AggregateKnowledgeMapEntry] = Field(default_factory=list)
 
 
 class TutorSessionRequest(BaseModel):
@@ -467,6 +536,8 @@ class StudentHistoryQuestion(BaseModel):
     effective_score: int
     grading_explanation: str
     criterion_scores: list[CriterionScore]
+    difficulty: Optional[Difficulty] = None
+    source_label: Optional[str] = None
     dispute_result: Optional[GradeDisputeResponse] = None
 
 
@@ -478,6 +549,7 @@ class StudentHistorySession(BaseModel):
     completed_at: str
     num_questions: int
     composite_score: int
+    knowledge_map: list[KnowledgeMapEntry] = Field(default_factory=list)
     questions: list[StudentHistoryQuestion]
 
 
@@ -494,6 +566,48 @@ class StudentHistoryResponse(BaseModel):
     student_name: str
     summary: StudentProgressSummary
     sessions: list[StudentHistorySession]
+
+
+class ProctorStatusRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    student_id: Optional[str] = None
+    status: ProctoringStatus
+
+
+class ProctorAnalyzeRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    student_id: Optional[str] = None
+    image_data_url: str = Field(min_length=20, max_length=2_000_000)
+
+
+class ProctorAnalysisResponse(BaseModel):
+    snapshot_id: str
+    session_id: str
+    captured_at: str
+    flags: list[str]
+    confidence: float = Field(ge=0, le=1)
+    description: str
+    image_data_url: str
+
+
+class LLMProctorAnalysis(BaseModel):
+    flags: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    description: str = Field(min_length=1)
+
+
+class ProctorAlertSession(BaseModel):
+    session_id: str
+    student_name: str
+    student_id: Optional[str] = None
+    domain: str
+    proctoring_status: ProctoringStatus
+    integrity_score: int
+    snapshots: list[ProctorAnalysisResponse]
+
+
+class ProctorAlertsResponse(BaseModel):
+    sessions: list[ProctorAlertSession]
 
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -515,6 +629,9 @@ _exam_sessions: dict[str, dict[str, Any]] = {}
 _completed_exams: list[dict[str, Any]] = []
 _students: dict[str, dict[str, Any]] = {}
 _student_ids_by_email: dict[str, str] = {}
+_material_chunks: dict[str, dict[str, Any]] = {}
+_material_chunk_ids_by_config: dict[str, list[str]] = defaultdict(list)
+_proctor_snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
 
 class MemoryExamStore:
@@ -554,6 +671,47 @@ class MemoryExamStore:
     async def get_exam_config(self, config_id: str) -> dict[str, Any] | None:
         return _exam_configs.get(config_id)
 
+    async def save_material_chunks(
+        self,
+        config_id: str,
+        chunks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        for chunk in chunks:
+            _material_chunks[chunk["chunk_id"]] = chunk
+            ids = _material_chunk_ids_by_config[config_id]
+            if chunk["chunk_id"] not in ids:
+                ids.append(chunk["chunk_id"])
+        return chunks
+
+    async def list_material_chunks(self, config_id: str) -> list[dict[str, Any]]:
+        return [
+            _material_chunks[chunk_id]
+            for chunk_id in _material_chunk_ids_by_config.get(config_id, [])
+            if chunk_id in _material_chunks
+        ]
+
+    async def update_material_chunk(
+        self,
+        chunk_id: str,
+        text: str,
+    ) -> dict[str, Any] | None:
+        chunk = _material_chunks.get(chunk_id)
+        if chunk is None:
+            return None
+        chunk["text"] = text
+        chunk["updated_at"] = _now_iso()
+        return chunk
+
+    async def delete_material_chunk(self, chunk_id: str) -> bool:
+        chunk = _material_chunks.pop(chunk_id, None)
+        if chunk is None:
+            return False
+        ids = _material_chunk_ids_by_config.get(chunk["config_id"], [])
+        _material_chunk_ids_by_config[chunk["config_id"]] = [
+            existing for existing in ids if existing != chunk_id
+        ]
+        return True
+
     async def create_session(self, record: dict[str, Any]) -> None:
         _exam_sessions[record["session_id"]] = record
 
@@ -575,6 +733,20 @@ class MemoryExamStore:
         pending: dict[str, Any] | None,
     ) -> None:
         _exam_sessions[session_id]["pending_question"] = pending
+
+    async def update_session_adaptive_state(
+        self,
+        session_id: str,
+        current_difficulty: Difficulty,
+    ) -> None:
+        _exam_sessions[session_id]["current_difficulty"] = current_difficulty
+
+    async def update_proctoring_status(
+        self,
+        session_id: str,
+        status: ProctoringStatus,
+    ) -> None:
+        _exam_sessions[session_id]["proctoring_status"] = status
 
     async def insert_question(
         self,
@@ -614,7 +786,26 @@ class MemoryExamStore:
         session["composite_score"] = result["composite_score"]
         session["composite_feedback"] = result["composite_feedback"]
         session["total_time_seconds"] = result["total_time_seconds"]
+        session["knowledge_map"] = result.get("knowledge_map", [])
         _completed_exams.append(result)
+
+    async def save_proctor_snapshot(
+        self,
+        session_id: str,
+        snapshot: dict[str, Any],
+    ) -> None:
+        _proctor_snapshots[session_id].append(snapshot)
+
+    async def list_proctor_alert_sessions(self) -> list[dict[str, Any]]:
+        sessions: list[dict[str, Any]] = []
+        for session in _exam_sessions.values():
+            snapshots = _proctor_snapshots.get(session["session_id"], [])
+            status = session.get("proctoring_status", "pending")
+            flagged = any(snapshot.get("confidence", 0) >= 0.7 and snapshot.get("flags") for snapshot in snapshots)
+            if status != "unproctored" and not flagged:
+                continue
+            sessions.append({**session, "proctor_snapshots": list(snapshots)})
+        return sessions
 
     async def list_completed_exams(self) -> list[dict[str, Any]]:
         return list(_completed_exams)
@@ -678,6 +869,44 @@ class ConvexExamStore:
     async def get_exam_config(self, config_id: str) -> dict[str, Any] | None:
         return await self._call("query", "exams:get", {"config_id": config_id})
 
+    async def save_material_chunks(
+        self,
+        config_id: str,
+        chunks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return await self._call(
+            "mutation",
+            "material_chunks:saveMany",
+            {"config_id": config_id, "chunks": chunks},
+        )
+
+    async def list_material_chunks(self, config_id: str) -> list[dict[str, Any]]:
+        return await self._call(
+            "query",
+            "material_chunks:listByConfig",
+            {"config_id": config_id},
+        )
+
+    async def update_material_chunk(
+        self,
+        chunk_id: str,
+        text: str,
+    ) -> dict[str, Any] | None:
+        return await self._call(
+            "mutation",
+            "material_chunks:updateText",
+            {"chunk_id": chunk_id, "text": text},
+        )
+
+    async def delete_material_chunk(self, chunk_id: str) -> bool:
+        return bool(
+            await self._call(
+                "mutation",
+                "material_chunks:deleteOne",
+                {"chunk_id": chunk_id},
+            )
+        )
+
     async def create_session(self, record: dict[str, Any]) -> None:
         await self._call("mutation", "sessions:create", {"session": record})
 
@@ -701,6 +930,28 @@ class ConvexExamStore:
             "mutation",
             "sessions:setPendingQuestion",
             {"session_id": session_id, "pending_question": pending},
+        )
+
+    async def update_session_adaptive_state(
+        self,
+        session_id: str,
+        current_difficulty: Difficulty,
+    ) -> None:
+        await self._call(
+            "mutation",
+            "sessions:updateAdaptiveState",
+            {"session_id": session_id, "current_difficulty": current_difficulty},
+        )
+
+    async def update_proctoring_status(
+        self,
+        session_id: str,
+        status: ProctoringStatus,
+    ) -> None:
+        await self._call(
+            "mutation",
+            "sessions:updateProctoringStatus",
+            {"session_id": session_id, "status": status},
         )
 
     async def insert_question(
@@ -742,6 +993,20 @@ class ConvexExamStore:
             "sessions:complete",
             {"session_id": session_id, "result": result},
         )
+
+    async def save_proctor_snapshot(
+        self,
+        session_id: str,
+        snapshot: dict[str, Any],
+    ) -> None:
+        await self._call(
+            "mutation",
+            "proctor_snapshots:create",
+            {"session_id": session_id, "snapshot": snapshot},
+        )
+
+    async def list_proctor_alert_sessions(self) -> list[dict[str, Any]]:
+        return await self._call("query", "sessions:listProctorAlerts", {})
 
     async def list_completed_exams(self) -> list[dict[str, Any]]:
         return await self._call("query", "sessions:listCompleted", {})
@@ -1054,6 +1319,320 @@ def _round_one(value: float) -> float:
     return round(value, 1)
 
 
+def _normalize_extracted_text(text: str) -> str:
+    cleaned = re.sub(r"[ \t]+", " ", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _extract_pdf_chunks(content: bytes, filename: str, config_id: str) -> list[dict[str, Any]]:
+    try:
+        from PyPDF2 import PdfReader
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="PyPDF2 is not installed. Run pip install -r requirements.txt.",
+        ) from exc
+
+    try:
+        reader = PdfReader(BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Could not read the PDF file.") from exc
+
+    chunks: list[dict[str, Any]] = []
+    for index, page in enumerate(reader.pages, start=1):
+        text = _normalize_extracted_text(page.extract_text() or "")
+        if not text:
+            continue
+        chunks.append(
+            _build_material_chunk(
+                config_id=config_id,
+                filename=filename,
+                source_type="pdf",
+                source_label=f"Page {index}",
+                chunk_index=len(chunks),
+                text=text,
+            )
+        )
+    return chunks
+
+
+def _extract_pptx_chunks(content: bytes, filename: str, config_id: str) -> list[dict[str, Any]]:
+    try:
+        from pptx import Presentation
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="python-pptx is not installed. Run pip install -r requirements.txt.",
+        ) from exc
+
+    try:
+        presentation = Presentation(BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Could not read the PPTX file.") from exc
+
+    chunks: list[dict[str, Any]] = []
+    for index, slide in enumerate(presentation.slides, start=1):
+        parts: list[str] = []
+        for shape in slide.shapes:
+            text = getattr(shape, "text", "")
+            if text:
+                parts.append(text)
+        normalized = _normalize_extracted_text("\n".join(parts))
+        if not normalized:
+            continue
+        chunks.append(
+            _build_material_chunk(
+                config_id=config_id,
+                filename=filename,
+                source_type="pptx",
+                source_label=f"Slide {index}",
+                chunk_index=len(chunks),
+                text=normalized,
+            )
+        )
+    return chunks
+
+
+def _build_material_chunk(
+    *,
+    config_id: str,
+    filename: str,
+    source_type: Literal["pdf", "pptx"],
+    source_label: str,
+    chunk_index: int,
+    text: str,
+) -> dict[str, Any]:
+    now = _now_iso()
+    return {
+        "chunk_id": uuid.uuid4().hex,
+        "config_id": config_id,
+        "source_filename": filename,
+        "source_type": source_type,
+        "source_label": source_label,
+        "chunk_index": chunk_index,
+        "text": text,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _keyword_score(text: str, focus: str | None) -> int:
+    if not focus:
+        return 0
+    words = {
+        word
+        for word in re.findall(r"[a-z0-9]{4,}", focus.lower())
+        if word not in {"with", "from", "that", "this", "into"}
+    }
+    lowered = text.lower()
+    return sum(lowered.count(word) for word in words)
+
+
+async def _select_material_chunks(
+    session: dict[str, Any],
+    question_index: int,
+    focus_topic: str | None,
+) -> list[dict[str, Any]]:
+    config_id = session.get("config_id")
+    if not config_id:
+        return []
+    chunks = await _store.list_material_chunks(config_id)
+    if not chunks:
+        return []
+
+    scored = sorted(
+        enumerate(chunks),
+        key=lambda item: (
+            _keyword_score(item[1].get("text", ""), focus_topic),
+            -abs(item[0] - (question_index % max(1, len(chunks)))),
+        ),
+        reverse=True,
+    )
+    picked = [chunk for _index, chunk in scored[:3]]
+    if not any(_keyword_score(chunk.get("text", ""), focus_topic) for chunk in picked):
+        start = question_index % len(chunks)
+        ordered = chunks[start:] + chunks[:start]
+        picked = ordered[:3]
+    return picked
+
+
+def _material_prompt_block(chunks: list[dict[str, Any]]) -> str:
+    if not chunks:
+        return ""
+    sections = []
+    for chunk in chunks:
+        text = chunk["text"][:4500]
+        sections.append(
+            f"[{chunk['source_label']} | {chunk['source_filename']}]\n{text}"
+        )
+    return "\n\n".join(sections)
+
+
+def _material_source_label(chunks: list[dict[str, Any]]) -> str | None:
+    if not chunks:
+        return None
+    first = chunks[0]["source_label"]
+    if len(chunks) == 1:
+        return first
+    return f"{first} + {len(chunks) - 1} more"
+
+
+DIFFICULTY_ORDER: list[Difficulty] = ["easy", "medium", "hard"]
+
+
+def _adjust_difficulty(current: Difficulty, recent_scores: list[int]) -> Difficulty:
+    if len(recent_scores) < 2:
+        return current
+    last_two = recent_scores[-2:]
+    current_index = DIFFICULTY_ORDER.index(current)
+    if all(score >= 85 for score in last_two):
+        return DIFFICULTY_ORDER[min(current_index + 1, len(DIFFICULTY_ORDER) - 1)]
+    if all(score < 60 for score in last_two):
+        return DIFFICULTY_ORDER[max(current_index - 1, 0)]
+    return current
+
+
+def _mastery_for_score(score: float) -> MasteryLevel:
+    if score < 50:
+        return "Not Yet"
+    if score < 70:
+        return "Developing"
+    if score < 85:
+        return "Proficient"
+    return "Mastered"
+
+
+def _default_knowledge_map(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_topic: dict[str, list[int]] = defaultdict(list)
+    for question in questions:
+        by_topic[question.get("topic") or "Untitled topic"].append(
+            _effective_question_score(question)
+        )
+    return [
+        {
+            "topic": topic,
+            "mastery_level": _mastery_for_score(avg),
+            "average_score": _clamp_score(avg),
+            "summary": f"Average score across {len(scores)} question(s): {_round_one(avg)}.",
+        }
+        for topic, scores in sorted(by_topic.items())
+        for avg in [sum(scores) / len(scores)]
+    ]
+
+
+async def _generate_knowledge_map(session: dict[str, Any]) -> list[dict[str, Any]]:
+    fallback = _default_knowledge_map(session["questions"])
+    if not session["questions"]:
+        return fallback
+
+    prompt_schema = build_prompt_schema(LLMKnowledgeMap)
+    question_lines: list[str] = []
+    for question in session["questions"]:
+        question_lines.append(
+            "\n".join(
+                [
+                    f"Topic: {question['topic']}",
+                    f"Difficulty: {question.get('difficulty') or session['difficulty']}",
+                    f"Score: {_effective_question_score(question)}",
+                    f"Question: {question['question']}",
+                    f"Feedback: {question['grading_explanation']}",
+                ]
+            )
+        )
+
+    try:
+        generated = await call_together_json(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Create a student knowledge map from exam results. "
+                        "Return concise JSON only matching this schema: "
+                        f"{prompt_schema}. Mastery levels must be exactly "
+                        "Not Yet, Developing, Proficient, or Mastered. Use "
+                        "the score bands: Not Yet below 50, Developing 50-69, "
+                        "Proficient 70-84, Mastered 85+. Group closely related "
+                        "subtopics when appropriate."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Domain: {session['domain']}\n"
+                        f"Student: {session['student_name']}\n\n"
+                        + "\n\n".join(question_lines)
+                    ),
+                },
+            ],
+            response_model=LLMKnowledgeMap,
+            temperature=0.2,
+        )
+    except Exception:
+        return fallback
+    return [entry.model_dump() for entry in generated.topics] or fallback
+
+
+async def call_together_vision_json(
+    *,
+    image_data_url: str,
+    prompt: str,
+    response_model: type[ResponseModelT],
+) -> ResponseModelT:
+    api_key = get_together_api_key()
+    payload = {
+        "model": os.getenv("TOGETHER_VISION_MODEL", "meta-llama/Llama-Vision-Free"),
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ],
+            }
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "schema": simplify_schema_for_together(response_model.model_json_schema()),
+        },
+        "temperature": 0.1,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
+        response = await client.post(TOGETHER_API_URL, headers=headers, json=payload)
+    try:
+        response.raise_for_status()
+        data = response.json()
+        parsed = parse_llm_content(extract_together_content(data))
+        return response_model.model_validate(parsed)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Together vision API returned an error: {exc.response.text}",
+        ) from exc
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Together vision API returned invalid JSON.",
+        ) from exc
+
+
+def _integrity_score(status: ProctoringStatus, snapshots: list[dict[str, Any]]) -> int:
+    if status == "unproctored":
+        return 60
+    penalty = 0
+    for snapshot in snapshots:
+        confidence = float(snapshot.get("confidence", 0))
+        if snapshot.get("flags") and confidence >= 0.7:
+            penalty += 25
+        elif snapshot.get("flags") and confidence >= 0.4:
+            penalty += 10
+    return max(0, 100 - penalty)
+
+
 # ── Teacher configuration endpoints ──────────────────────────────────────────
 
 
@@ -1084,6 +1663,82 @@ async def list_exam_configs() -> list[ConfigureExamResponse]:
         ConfigureExamResponse(**config)
         for config in await _store.list_exam_configs()
     ]
+
+
+@app.post("/api/upload-material", response_model=UploadMaterialResponse)
+async def upload_material(
+    config_id: str = Form(...),
+    file: UploadFile = File(...),
+) -> UploadMaterialResponse:
+    config = await _store.get_exam_config(config_id)
+    if config is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Exam config {config_id!r} not found.",
+        )
+
+    filename = file.filename or "uploaded-material"
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    if suffix == "pdf":
+        chunks = _extract_pdf_chunks(content, filename, config_id)
+    elif suffix == "pptx":
+        chunks = _extract_pptx_chunks(content, filename, config_id)
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and PPTX files are supported.",
+        )
+
+    if not chunks:
+        raise HTTPException(
+            status_code=400,
+            detail="No readable text was found in the uploaded file.",
+        )
+
+    saved = await _store.save_material_chunks(config_id, chunks)
+    return UploadMaterialResponse(
+        config_id=config_id,
+        source_filename=filename,
+        chunks=[MaterialChunk(**chunk) for chunk in saved],
+    )
+
+
+@app.get("/api/material-chunks", response_model=list[MaterialChunk])
+async def list_material_chunks(
+    config_id: str = Query(min_length=1),
+) -> list[MaterialChunk]:
+    return [
+        MaterialChunk(**chunk)
+        for chunk in await _store.list_material_chunks(config_id)
+    ]
+
+
+@app.patch("/api/material-chunk", response_model=MaterialChunk)
+async def update_material_chunk(
+    request: UpdateMaterialChunkRequest,
+) -> MaterialChunk:
+    chunk = await _store.update_material_chunk(request.chunk_id, request.text)
+    if chunk is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Material chunk {request.chunk_id!r} not found.",
+        )
+    return MaterialChunk(**chunk)
+
+
+@app.delete("/api/material-chunk")
+async def delete_material_chunk(request: DeleteMaterialChunkRequest) -> dict[str, bool]:
+    deleted = await _store.delete_material_chunk(request.chunk_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Material chunk {request.chunk_id!r} not found.",
+        )
+    return {"deleted": True}
 
 
 @app.get("/api/exam-results", response_model=ExamResultsResponse)
@@ -1195,6 +1850,28 @@ async def exam_analytics() -> ExamAnalyticsResponse:
         if item["original_scores"]
     ]
 
+    knowledge_scores: dict[str, list[int]] = defaultdict(list)
+    for exam in completed_exams:
+        for entry in exam.get("knowledge_map", []):
+            topic = entry.get("topic")
+            if not topic:
+                continue
+            knowledge_scores[topic].append(int(entry.get("average_score", 0)))
+
+    aggregate_knowledge_map = [
+        AggregateKnowledgeMapEntry(
+            topic=topic,
+            average_score=_round_one(sum(scores) / len(scores)),
+            mastery_level=_mastery_for_score(sum(scores) / len(scores)),
+            attempts=len(scores),
+        )
+        for topic, scores in sorted(
+            knowledge_scores.items(),
+            key=lambda item: (sum(item[1]) / len(item[1]), item[0]),
+        )
+        if scores
+    ]
+
     sessions = [
         AnalyticsSession(
             session_id=exam["session_id"],
@@ -1208,6 +1885,7 @@ async def exam_analytics() -> ExamAnalyticsResponse:
                 for question in exam.get("questions", [])
                 if question.get("dispute_result") is not None
             ),
+            proctoring_status=exam.get("proctoring_status", "pending"),
         )
         for exam in sorted(
             completed_exams,
@@ -1230,6 +1908,7 @@ async def exam_analytics() -> ExamAnalyticsResponse:
         per_question_average_scores=per_question,
         most_disputed_questions=most_disputed,
         sessions=sessions,
+        aggregate_knowledge_map=aggregate_knowledge_map,
     )
 
 
@@ -1298,6 +1977,8 @@ async def student_history(
                         CriterionScore(**score)
                         for score in question["criterion_scores"]
                     ],
+                    difficulty=question.get("difficulty"),
+                    source_label=question.get("source_label"),
                     dispute_result=(
                         GradeDisputeResponse(**question["dispute_result"])
                         if question.get("dispute_result")
@@ -1305,6 +1986,10 @@ async def student_history(
                     ),
                 )
                 for question in exam.get("questions", [])
+            ],
+            knowledge_map=[
+                KnowledgeMapEntry(**entry)
+                for entry in exam.get("knowledge_map", [])
             ],
         )
         for exam in exams
@@ -1372,6 +2057,7 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
         "student_name": student_name,
         "domain": domain,
         "difficulty": difficulty,
+        "current_difficulty": difficulty,
         "grade_level": grade_level,
         "grading_personality": grading_personality,
         "teacher_name": teacher_name,
@@ -1382,6 +2068,8 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
         "questions": [],  # list[dict]
         "pending_question": None,  # dict | None (generated but not yet answered)
         "tutor_sessions": {},  # question index string -> list[dict]
+        "proctoring_status": "pending",
+        "knowledge_map": [],
         "status": "in_progress",
         "created_at": _now_iso(),
     })
@@ -1396,6 +2084,8 @@ async def start_exam(request: StartExamRequest) -> StartExamResponse:
         grading_personality=grading_personality,
         teacher_name=teacher_name,
         num_questions=num_questions,
+        current_difficulty=difficulty,
+        proctoring_status="pending",
     )
 
 
@@ -1438,12 +2128,16 @@ async def generate_question(
             topic=pending["topic"],
             question_index=question_index,
             total_questions=total_questions,
+            difficulty=pending.get("difficulty", session.get("current_difficulty", session["difficulty"])),
+            source_chunk_id=pending.get("source_chunk_id"),
+            source_label=pending.get("source_label"),
         )
 
     covered = _covered_topics(session)
     focus_topic: str | None = None
     if session["topics"]:
         focus_topic = session["topics"][question_index % len(session["topics"])]
+    material_chunks = await _select_material_chunks(session, question_index, focus_topic)
 
     prompt_schema = build_prompt_schema(LLMGeneratedQuestion)
 
@@ -1464,8 +2158,19 @@ async def generate_question(
         if session["special_instructions"]
         else ""
     )
+    material_block = _material_prompt_block(material_chunks)
+    material_guidance = (
+        "Uploaded course material is provided below. Generate the question "
+        "directly from this professor-provided material rather than general "
+        "knowledge. The background_info must reference concepts, examples, "
+        "or framing from the uploaded content. Build the grading rubric from "
+        "what the material actually teaches, and avoid facts not grounded in "
+        "the excerpts."
+        if material_chunks
+        else ""
+    )
 
-    difficulty = session["difficulty"]
+    difficulty = session.get("current_difficulty") or session["difficulty"]
     style_guidance = DIFFICULTY_QUESTION_STYLE[difficulty]
     grade_level: GradeLevel = session["grade_level"]
     grade_level_guidance = GRADE_LEVEL_QUESTION_STYLE[grade_level]
@@ -1480,6 +2185,7 @@ async def generate_question(
         "The question must be a single essay prompt. "
         "The grading_rubric must be 3-5 concise criteria. "
         "The topic must be a short 2-6 word label naming the subtopic. "
+        f"{material_guidance} "
         f"Difficulty guidance: {style_guidance} "
         f"Grade level guidance: {grade_level_guidance} "
         "Do not include markdown, code fences, or any extra text."
@@ -1493,6 +2199,7 @@ async def generate_question(
         f"Already-covered subtopics (do NOT repeat):\n{covered_block}\n"
         f"{focus_block}\n"
         + (f"{special_block}\n" if special_block else "")
+        + (f"\nUploaded material excerpts:\n{material_block}\n" if material_block else "")
     )
 
     generated = await call_together_json(
@@ -1511,6 +2218,9 @@ async def generate_question(
         "background_info": generated.background_info.strip(),
         "question": generated.question.strip(),
         "grading_rubric": [r.strip() for r in generated.grading_rubric if r.strip()],
+        "difficulty": difficulty,
+        "source_chunk_id": material_chunks[0]["chunk_id"] if material_chunks else None,
+        "source_label": _material_source_label(material_chunks),
     }
     await _store.set_pending_question(request.session_id, pending)
 
@@ -1521,6 +2231,9 @@ async def generate_question(
         topic=pending["topic"],
         question_index=question_index,
         total_questions=total_questions,
+        difficulty=difficulty,
+        source_chunk_id=pending["source_chunk_id"],
+        source_label=pending["source_label"],
     )
 
 
@@ -1573,7 +2286,7 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
         )
 
     question_index = len(session["questions"])
-    difficulty = session["difficulty"]
+    difficulty = pending.get("difficulty") or session.get("current_difficulty") or session["difficulty"]
     strictness = DIFFICULTY_GRADING_STRICTNESS[difficulty]
     grade_level: GradeLevel = session["grade_level"]
     grade_expectations = GRADE_LEVEL_GRADING_EXPECTATIONS[grade_level]
@@ -1658,15 +2371,26 @@ async def grade_answer(request: GradeAnswerRequest) -> GradeAnswerResponse:
             graded.grading_explanation,
             teacher_name,
         ),
+        "difficulty": difficulty,
+        "source_chunk_id": pending.get("source_chunk_id"),
+        "source_label": pending.get("source_label"),
         "dispute_result": None,
     }
+    recent_scores = [
+        int(question["overall_score"])
+        for question in session["questions"]
+    ] + [graded.overall_score]
+    next_difficulty = _adjust_difficulty(difficulty, recent_scores)
     await _store.insert_question(request.session_id, record)
+    await _store.update_session_adaptive_state(request.session_id, next_difficulty)
 
     return GradeAnswerResponse(
         criterion_scores=aligned_scores,
         overall_score=graded.overall_score,
         grading_explanation=record["grading_explanation"],
         question_index=question_index,
+        current_difficulty=difficulty,
+        next_difficulty=next_difficulty,
     )
 
 
@@ -1854,6 +2578,9 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
             overall_score=q["overall_score"],
             grading_explanation=q["grading_explanation"],
             time_spent_seconds=q["time_spent_seconds"],
+            difficulty=q.get("difficulty"),
+            source_chunk_id=q.get("source_chunk_id"),
+            source_label=q.get("source_label"),
             dispute_result=(
                 GradeDisputeResponse(**q["dispute_result"])
                 if q.get("dispute_result")
@@ -1865,6 +2592,7 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
 
     total_time = sum(q["time_spent_seconds"] for q in session["questions"])
     completed_at = _now_iso()
+    knowledge_map = await _generate_knowledge_map(session)
 
     result = FinishExamResponse(
         session_id=session["session_id"],
@@ -1884,11 +2612,94 @@ async def finish_exam(request: FinishExamRequest) -> FinishExamResponse:
         ),
         total_time_seconds=total_time,
         completed_at=completed_at,
+        knowledge_map=[KnowledgeMapEntry(**entry) for entry in knowledge_map],
     )
 
     await _store.complete_session(request.session_id, result.model_dump())
 
     return result
+
+
+@app.post("/api/proctor/status")
+async def update_proctor_status(request: ProctorStatusRequest) -> dict[str, str]:
+    await _require_session(request.session_id, request.student_id)
+    await _store.update_proctoring_status(request.session_id, request.status)
+    return {"status": request.status}
+
+
+@app.post("/api/proctor/analyze", response_model=ProctorAnalysisResponse)
+async def analyze_proctor_snapshot(
+    request: ProctorAnalyzeRequest,
+) -> ProctorAnalysisResponse:
+    await _require_session(request.session_id, request.student_id)
+    await _store.update_proctoring_status(request.session_id, "active")
+
+    prompt = (
+        "You are reviewing a webcam frame from an online exam. Return JSON "
+        "only. Analyze whether there are multiple people visible, the student "
+        "appears to be looking away from the screen, a phone or second device "
+        "is visible, or notes/screens are visible that should not be present. "
+        "Set flags to short machine-readable strings such as multiple_people, "
+        "looking_away, phone_visible, notes_visible, or second_screen_visible. "
+        "Use confidence from 0 to 1 for the most serious detected issue. If "
+        "nothing concerning is visible, return an empty flags array and low "
+        "confidence."
+    )
+    try:
+        analysis = await call_together_vision_json(
+            image_data_url=request.image_data_url,
+            prompt=prompt,
+            response_model=LLMProctorAnalysis,
+        )
+    except HTTPException:
+        analysis = LLMProctorAnalysis(
+            flags=[],
+            confidence=0,
+            description="Vision analysis was unavailable for this frame.",
+        )
+
+    snapshot = {
+        "snapshot_id": uuid.uuid4().hex,
+        "session_id": request.session_id,
+        "captured_at": _now_iso(),
+        "flags": [flag.strip() for flag in analysis.flags if flag.strip()],
+        "confidence": float(analysis.confidence),
+        "description": analysis.description.strip(),
+        "image_data_url": request.image_data_url,
+    }
+    await _store.save_proctor_snapshot(request.session_id, snapshot)
+    return ProctorAnalysisResponse(**snapshot)
+
+
+@app.get("/api/proctor/alerts", response_model=ProctorAlertsResponse)
+async def proctor_alerts() -> ProctorAlertsResponse:
+    sessions = await _store.list_proctor_alert_sessions()
+    alert_sessions: list[ProctorAlertSession] = []
+    for session in sorted(
+        sessions,
+        key=lambda item: item.get("completed_at") or item.get("created_at", ""),
+        reverse=True,
+    ):
+        snapshots = [
+            ProctorAnalysisResponse(**snapshot)
+            for snapshot in session.get("proctor_snapshots", [])
+        ]
+        status = session.get("proctoring_status", "pending")
+        alert_sessions.append(
+            ProctorAlertSession(
+                session_id=session["session_id"],
+                student_id=session.get("student_id"),
+                student_name=session["student_name"],
+                domain=session["domain"],
+                proctoring_status=status,
+                integrity_score=_integrity_score(
+                    status,
+                    [snapshot.model_dump() for snapshot in snapshots],
+                ),
+                snapshots=snapshots,
+            )
+        )
+    return ProctorAlertsResponse(sessions=alert_sessions)
 
 
 @app.post("/api/tutor-session", response_model=TutorSessionResponse)

@@ -44,6 +44,9 @@ interface GenerateQuestionResponse {
   topic: string
   question_index: number
   total_questions: number
+  difficulty: Difficulty
+  source_chunk_id?: string | null
+  source_label?: string | null
 }
 
 interface CriterionScore {
@@ -57,6 +60,8 @@ interface GradeAnswerResponse {
   overall_score: number
   grading_explanation: string
   question_index: number
+  current_difficulty?: Difficulty | null
+  next_difficulty?: Difficulty | null
 }
 
 interface GradeDisputeResponse {
@@ -77,7 +82,20 @@ interface QuestionReport {
   overall_score: number
   grading_explanation: string
   time_spent_seconds: number
+  difficulty?: Difficulty | null
+  source_chunk_id?: string | null
+  source_label?: string | null
   dispute_result?: GradeDisputeResponse | null
+}
+
+type MasteryLevel = 'Not Yet' | 'Developing' | 'Proficient' | 'Mastered'
+type ProctoringStatus = 'pending' | 'active' | 'unproctored'
+
+interface KnowledgeMapEntry {
+  topic: string
+  mastery_level: MasteryLevel
+  average_score: number
+  summary: string
 }
 
 interface FinishExamResponse {
@@ -95,6 +113,7 @@ interface FinishExamResponse {
   composite_feedback: string
   total_time_seconds: number
   completed_at: string
+  knowledge_map: KnowledgeMapEntry[]
 }
 
 interface ScoreDistributionBucket {
@@ -129,6 +148,14 @@ interface AnalyticsSession {
   num_questions: number
   composite_score: number
   dispute_count: number
+  proctoring_status: ProctoringStatus
+}
+
+interface AggregateKnowledgeMapEntry {
+  topic: string
+  average_score: number
+  mastery_level: MasteryLevel
+  attempts: number
 }
 
 interface ExamAnalyticsResponse {
@@ -139,6 +166,7 @@ interface ExamAnalyticsResponse {
   per_question_average_scores: PerQuestionAnalytics[]
   most_disputed_questions: DisputedQuestionAnalytics[]
   sessions: AnalyticsSession[]
+  aggregate_knowledge_map: AggregateKnowledgeMapEntry[]
 }
 
 interface TutorMessage {
@@ -168,6 +196,8 @@ interface StudentHistoryQuestion {
   effective_score: number
   grading_explanation: string
   criterion_scores: CriterionScore[]
+  difficulty?: Difficulty | null
+  source_label?: string | null
   dispute_result?: GradeDisputeResponse | null
 }
 
@@ -179,6 +209,7 @@ interface StudentHistorySession {
   completed_at: string
   num_questions: number
   composite_score: number
+  knowledge_map: KnowledgeMapEntry[]
   questions: StudentHistoryQuestion[]
 }
 
@@ -197,6 +228,48 @@ interface StudentHistoryResponse {
   sessions: StudentHistorySession[]
 }
 
+interface MaterialChunk {
+  chunk_id: string
+  config_id: string
+  source_filename: string
+  source_type: 'pdf' | 'pptx'
+  source_label: string
+  chunk_index: number
+  text: string
+  created_at: string
+  updated_at: string
+}
+
+interface UploadMaterialResponse {
+  config_id: string
+  source_filename: string
+  chunks: MaterialChunk[]
+}
+
+interface ProctorAnalysisResponse {
+  snapshot_id: string
+  session_id: string
+  captured_at: string
+  flags: string[]
+  confidence: number
+  description: string
+  image_data_url: string
+}
+
+interface ProctorAlertSession {
+  session_id: string
+  student_name: string
+  student_id?: string | null
+  domain: string
+  proctoring_status: ProctoringStatus
+  integrity_score: number
+  snapshots: ProctorAnalysisResponse[]
+}
+
+interface ProctorAlertsResponse {
+  sessions: ProctorAlertSession[]
+}
+
 // ── API helpers ──────────────────────────────────────────────────────────────
 
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
@@ -204,6 +277,47 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null)
+    throw new Error(payload?.detail || `Server error (${res.status})`)
+  }
+  return res.json()
+}
+
+async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null)
+    throw new Error(payload?.detail || `Server error (${res.status})`)
+  }
+  return res.json()
+}
+
+async function apiDelete<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null)
+    throw new Error(payload?.detail || `Server error (${res.status})`)
+  }
+  return res.json()
+}
+
+async function apiUploadMaterial(configId: string, file: File): Promise<UploadMaterialResponse> {
+  const form = new FormData()
+  form.append('config_id', configId)
+  form.append('file', file)
+  const res = await fetch('/api/upload-material', {
+    method: 'POST',
+    body: form,
   })
   if (!res.ok) {
     const payload = await res.json().catch(() => null)
@@ -334,6 +448,17 @@ function scoreClass(score: number): string {
   if (score >= 85) return 'text-ink'
   if (score >= 65) return 'text-ink'
   return 'text-oxblood'
+}
+
+function masteryClass(level: MasteryLevel): string {
+  if (level === 'Mastered') return 'mastery-mastered'
+  if (level === 'Proficient') return 'mastery-proficient'
+  if (level === 'Developing') return 'mastery-developing'
+  return 'mastery-not-yet'
+}
+
+function compactFlags(flags: string[]): string {
+  return flags.length ? flags.map(flag => flag.replaceAll('_', ' ')).join(', ') : 'No flags'
 }
 
 function ScoreBar({ score }: { score: number }) {
@@ -689,6 +814,160 @@ function TeacherHome({ navigate }: { navigate: (p: string) => void }) {
 
 // ── Teacher — configure ──────────────────────────────────────────────────────
 
+function MaterialUploadManager({ configId }: { configId: string }) {
+  const [chunks, setChunks] = useState<MaterialChunk[] | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draftText, setDraftText] = useState('')
+  const [error, setError] = useState('')
+
+  const loadChunks = useCallback(() => {
+    setError('')
+    apiGet<MaterialChunk[]>(`/api/material-chunks?${new URLSearchParams({ config_id: configId }).toString()}`)
+      .then(setChunks)
+      .catch(err => setError(err instanceof Error ? err.message : 'Could not load material chunks.'))
+  }, [configId])
+
+  useEffect(() => {
+    loadChunks()
+  }, [loadChunks])
+
+  async function handleFile(file: File | null) {
+    if (!file) return
+    setUploading(true)
+    setError('')
+    try {
+      const result = await apiUploadMaterial(configId, file)
+      setChunks(current => [...(current ?? []), ...result.chunks])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not upload material.')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function saveChunk(chunkId: string) {
+    setError('')
+    try {
+      const updated = await apiPatch<MaterialChunk>('/api/material-chunk', {
+        chunk_id: chunkId,
+        text: draftText,
+      })
+      setChunks(current => (current ?? []).map(chunk => chunk.chunk_id === chunkId ? updated : chunk))
+      setEditingId(null)
+      setDraftText('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save this chunk.')
+    }
+  }
+
+  async function deleteChunk(chunkId: string) {
+    setError('')
+    try {
+      await apiDelete<{ deleted: boolean }>('/api/material-chunk', { chunk_id: chunkId })
+      setChunks(current => (current ?? []).filter(chunk => chunk.chunk_id !== chunkId))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete this chunk.')
+    }
+  }
+
+  return (
+    <section className="mt-10 border-t border-ink/20 pt-8">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <div className="field-label">Lecture material</div>
+          <p className="mt-2 font-serif text-ink-soft">
+            Upload PDF or PPTX course content. Each page or slide becomes an editable question source.
+          </p>
+        </div>
+        <label className="btn-ghost">
+          {uploading ? 'Extracting…' : 'Upload PDF/PPTX'}
+          <input
+            type="file"
+            accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            className="sr-only"
+            disabled={uploading}
+            onChange={event => {
+              handleFile(event.target.files?.[0] ?? null)
+              event.currentTarget.value = ''
+            }}
+          />
+        </label>
+      </div>
+
+      {error && <div className="mt-4"><ErrorBanner message={error} /></div>}
+      {chunks === null && !error && (
+        <p className="mt-4 font-serif italic text-ink-soft">Reading uploaded material…</p>
+      )}
+      {chunks && chunks.length === 0 && (
+        <p className="mt-4 font-serif italic text-ink-soft">
+          No lecture material has been attached to this exam yet.
+        </p>
+      )}
+      {chunks && chunks.length > 0 && (
+        <div className="mt-5 space-y-4">
+          {chunks.map(chunk => {
+            const editing = editingId === chunk.chunk_id
+            return (
+              <div key={chunk.chunk_id} className="border border-ink/15 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="font-mono text-xs uppercase tracking-[0.22em] text-oxblood">
+                      {chunk.source_label} · {chunk.source_filename}
+                    </div>
+                    <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-ink-soft">
+                      Chunk {String(chunk.chunk_index + 1).padStart(2, '0')}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() => {
+                        setEditingId(editing ? null : chunk.chunk_id)
+                        setDraftText(editing ? '' : chunk.text)
+                      }}
+                    >
+                      {editing ? 'Cancel' : 'Edit'}
+                    </button>
+                    <button type="button" className="btn-ghost" onClick={() => deleteChunk(chunk.chunk_id)}>
+                      Delete
+                    </button>
+                  </div>
+                </div>
+                {editing ? (
+                  <div className="mt-4">
+                    <textarea
+                      rows={8}
+                      value={draftText}
+                      onChange={event => setDraftText(event.target.value)}
+                      className="input-field"
+                    />
+                    <div className="mt-3 flex justify-end">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={!draftText.trim()}
+                        onClick={() => saveChunk(chunk.chunk_id)}
+                      >
+                        Save chunk
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-3 max-h-40 overflow-y-auto font-serif text-sm leading-relaxed text-ink-soft whitespace-pre-line">
+                    {chunk.text}
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </section>
+  )
+}
+
 function TeacherConfigure({ navigate }: { navigate: (p: string) => void }) {
   const [domain, setDomain] = useState('')
   const [difficulty, setDifficulty] = useState<Difficulty>('medium')
@@ -762,6 +1041,7 @@ function TeacherConfigure({ navigate }: { navigate: (p: string) => void }) {
             <dt className="field-label">Instructions</dt>
             <dd className="font-serif">{saved.special_instructions || '—'}</dd>
           </dl>
+          <MaterialUploadManager configId={saved.config_id} />
           <div className="mt-8 flex flex-wrap gap-3">
             <button className="btn-primary" onClick={() => navigate('/student?config=' + saved.config_id)}>
               Preview as student →
@@ -1000,6 +1280,8 @@ function TeacherResults({ navigate }: { navigate: (p: string) => void }) {
 
 function TeacherDashboard({ navigate }: { navigate: (p: string) => void }) {
   const [analytics, setAnalytics] = useState<ExamAnalyticsResponse | null>(null)
+  const [proctorAlerts, setProctorAlerts] = useState<ProctorAlertsResponse | null>(null)
+  const [reviewSession, setReviewSession] = useState<ProctorAlertSession | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -1011,6 +1293,13 @@ function TeacherDashboard({ navigate }: { navigate: (p: string) => void }) {
       .catch(err => {
         if (alive) setError(err instanceof Error ? err.message : 'Failed to load analytics.')
       })
+    apiGet<ProctorAlertsResponse>('/api/proctor/alerts')
+      .then(data => {
+        if (alive) setProctorAlerts(data)
+      })
+      .catch(() => {
+        if (alive) setProctorAlerts({ sessions: [] })
+      })
     return () => {
       alive = false
     }
@@ -1020,6 +1309,7 @@ function TeacherDashboard({ navigate }: { navigate: (p: string) => void }) {
     1,
     ...(analytics?.score_distribution.map(bucket => bucket.count) ?? [0]),
   )
+  const aggregateKnowledgeMap = analytics?.aggregate_knowledge_map ?? []
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-12">
@@ -1121,6 +1411,31 @@ function TeacherDashboard({ navigate }: { navigate: (p: string) => void }) {
             </div>
           </section>
 
+          <section className="paper paper-margin p-6 md:p-8">
+            <div className="field-label">Aggregate knowledge map</div>
+            {aggregateKnowledgeMap.length === 0 ? (
+              <p className="mt-4 font-serif italic text-ink-soft">
+                Knowledge maps appear after completed exams include topic mastery data.
+              </p>
+            ) : (
+              <div className="knowledge-grid mt-4">
+                {aggregateKnowledgeMap.map(entry => (
+                  <div key={entry.topic} className={'knowledge-cell ' + masteryClass(entry.mastery_level)}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-display text-2xl leading-tight">{entry.topic}</div>
+                        <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em]">
+                          {entry.mastery_level} · {entry.attempts} attempt{entry.attempts === 1 ? '' : 's'}
+                        </div>
+                      </div>
+                      <div className="font-display text-4xl leading-none">{entry.average_score}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
           <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="paper paper-margin p-6 md:p-8">
               <div className="field-label">Per-question stats</div>
@@ -1171,6 +1486,97 @@ function TeacherDashboard({ navigate }: { navigate: (p: string) => void }) {
               </div>
             </div>
           </section>
+        </div>
+      )}
+
+      <section className="mt-8 paper paper-margin p-6 md:p-8">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <div className="field-label">Proctoring alerts</div>
+            <p className="mt-2 font-serif text-ink-soft">
+              Flagged webcam frames and unproctored sessions are listed for instructor review.
+            </p>
+          </div>
+          <span className="chip">{proctorAlerts?.sessions.length ?? 0} session{(proctorAlerts?.sessions.length ?? 0) === 1 ? '' : 's'}</span>
+        </div>
+        {!proctorAlerts && (
+          <p className="mt-4 font-serif italic text-ink-soft">Loading proctoring ledger…</p>
+        )}
+        {proctorAlerts && proctorAlerts.sessions.length === 0 && (
+          <p className="mt-4 font-serif italic text-ink-soft">No proctoring alerts have been recorded.</p>
+        )}
+        {proctorAlerts && proctorAlerts.sessions.length > 0 && (
+          <div className="mt-5 space-y-4">
+            {proctorAlerts.sessions.map(session => {
+              const latest = session.snapshots[session.snapshots.length - 1]
+              return (
+                <div key={session.session_id} className="border border-ink/15 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <div className="font-mono text-xs uppercase tracking-[0.22em] text-oxblood">
+                        {session.student_name} · {session.domain}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <span className="chip">Integrity {session.integrity_score}</span>
+                        <span className="chip">{session.proctoring_status}</span>
+                        {latest && <span className="chip">{compactFlags(latest.flags)}</span>}
+                      </div>
+                      {latest && (
+                        <p className="mt-3 font-serif text-sm text-ink-soft">
+                          {new Date(latest.captured_at).toLocaleString()} · confidence {Math.round(latest.confidence * 100)}% · {latest.description}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-start gap-3">
+                      {latest && <img src={latest.image_data_url} alt="Proctoring frame thumbnail" className="proctor-thumb" />}
+                      <button type="button" className="btn-ghost" onClick={() => setReviewSession(session)}>
+                        Review
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </section>
+
+      {reviewSession && (
+        <div className="fixed inset-0 z-20 bg-ink/40 px-4 py-8 overflow-y-auto">
+          <div className="mx-auto max-w-4xl paper p-6 md:p-8">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="field-label">Proctoring timeline</div>
+                <h2 className="mt-2 font-display text-4xl">{reviewSession.student_name}</h2>
+                <p className="mt-1 font-serif text-ink-soft">{reviewSession.domain}</p>
+              </div>
+              <button type="button" className="btn-ghost" onClick={() => setReviewSession(null)}>
+                Close
+              </button>
+            </div>
+            <div className="mt-6 space-y-4">
+              {reviewSession.snapshots.length === 0 && (
+                <p className="font-serif italic text-ink-soft">
+                  This session is marked unproctored because camera access was denied.
+                </p>
+              )}
+              {reviewSession.snapshots.map(snapshot => (
+                <div key={snapshot.snapshot_id} className="grid grid-cols-1 md:grid-cols-[180px_1fr] gap-4 border border-ink/15 p-4">
+                  <img src={snapshot.image_data_url} alt="Captured proctoring frame" className="w-full border border-ink/20" />
+                  <div>
+                    <div className="font-mono text-xs uppercase tracking-[0.22em] text-ink-soft">
+                      {new Date(snapshot.captured_at).toLocaleString()}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <span className="chip">{compactFlags(snapshot.flags)}</span>
+                      <span className="chip">confidence {Math.round(snapshot.confidence * 100)}%</span>
+                    </div>
+                    <p className="mt-3 font-serif text-ink-soft">{snapshot.description}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -1394,6 +1800,83 @@ type ExamPhase =
   | { kind: 'finished'; report: FinishExamResponse }
   | { kind: 'error'; message: string; retryable: boolean }
 
+function useWebcamProctor(session: StartExamResponse, student: StudentProfile) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const [status, setStatus] = useState<ProctoringStatus>('pending')
+  const [warning, setWarning] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    async function markStatus(nextStatus: ProctoringStatus) {
+      setStatus(nextStatus)
+      await apiPost<{ status: string }>('/api/proctor/status', {
+        session_id: session.session_id,
+        student_id: student.student_id,
+        status: nextStatus,
+      }).catch(() => undefined)
+    }
+
+    async function captureFrame() {
+      const video = videoRef.current
+      if (!video || !video.videoWidth || !video.videoHeight) return
+      const canvas = document.createElement('canvas')
+      canvas.width = 360
+      canvas.height = Math.round((video.videoHeight / video.videoWidth) * 360) || 240
+      const context = canvas.getContext('2d')
+      if (!context) return
+      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      const imageDataUrl = canvas.toDataURL('image/jpeg', 0.55)
+      const result = await apiPost<ProctorAnalysisResponse>('/api/proctor/analyze', {
+        session_id: session.session_id,
+        student_id: student.student_id,
+        image_data_url: imageDataUrl,
+      }).catch(() => null)
+      if (!result || cancelled) return
+      if (result.flags.length > 0 && result.confidence > 0.7) {
+        setWarning('Please keep your eyes on the screen.')
+        window.setTimeout(() => setWarning(''), 8000)
+      }
+    }
+
+    async function startCamera() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        await markStatus('unproctored')
+        return
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+        if (cancelled) {
+          stream.getTracks().forEach(track => track.stop())
+          return
+        }
+        streamRef.current = stream
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          await videoRef.current.play().catch(() => undefined)
+        }
+        await markStatus('active')
+        captureFrame()
+        intervalId = window.setInterval(captureFrame, 30000)
+      } catch {
+        await markStatus('unproctored')
+      }
+    }
+
+    startCamera()
+    return () => {
+      cancelled = true
+      if (intervalId) window.clearInterval(intervalId)
+      streamRef.current?.getTracks().forEach(track => track.stop())
+      streamRef.current = null
+    }
+  }, [session.session_id, student.student_id])
+
+  return { videoRef, status, warning }
+}
+
 function StudentExam({
   session,
   student,
@@ -1411,6 +1894,7 @@ function StudentExam({
 }) {
   const [phase, setPhase] = useState<ExamPhase>({ kind: 'loading-question' })
   const [answeredCount, setAnsweredCount] = useState(0)
+  const proctor = useWebcamProctor(session, student)
 
   const requestQuestion = useCallback(() => {
     return apiPost<GenerateQuestionResponse>('/api/generate-question', {
@@ -1512,6 +1996,24 @@ function StudentExam({
           style={{ width: `${(answeredCount / totalQuestions) * 100}%` }}
         />
       </div>
+
+      <div className="proctor-preview" aria-label="Webcam proctoring preview">
+        <video ref={proctor.videoRef} muted playsInline className={proctor.status === 'active' ? '' : 'opacity-0'} />
+        {proctor.status !== 'active' && (
+          <div className="proctor-off">
+            <span>{proctor.status === 'unproctored' ? 'Unproctored' : 'Camera pending'}</span>
+          </div>
+        )}
+        <div className="proctor-label">
+          {proctor.status === 'active' ? 'Proctored' : proctor.status === 'unproctored' ? 'Unproctored' : 'Checking camera'}
+        </div>
+      </div>
+
+      {proctor.warning && (
+        <div className="mt-5 border border-[#a16207] bg-[#fef3c7] px-4 py-3 font-serif text-sm text-[#713f12]">
+          {proctor.warning}
+        </div>
+      )}
 
       <div className="mt-8">
         {phase.kind === 'loading-question' && (
@@ -1618,9 +2120,11 @@ function WritingPaper({
           <span className="font-mono text-xs tracking-[0.2em] uppercase text-ink-soft">
             Q{String(question.question_index + 1).padStart(2, '0')} of {String(question.total_questions).padStart(2, '0')}
           </span>
+          <span className="chip">{question.difficulty}</span>
+          {question.source_label && <span className="chip">From {question.source_label}</span>}
         </div>
         <div className="font-mono text-base tracking-wider text-oxblood">
-          ⏱ {formatted}
+          Time {formatted}
         </div>
       </div>
 
@@ -1697,9 +2201,10 @@ function ReviewPaper({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Stamp>Marked</Stamp>
-          <span className="font-mono text-xs tracking-[0.2em] uppercase text-ink-soft">
-            {question.topic}
+        <span className="font-mono text-xs tracking-[0.2em] uppercase text-ink-soft">
+            {question.topic} · {grade.current_difficulty ?? question.difficulty}
           </span>
+          {question.source_label && <span className="chip">From {question.source_label}</span>}
         </div>
         <div className="text-right">
           <div className="field-label">Overall score</div>
@@ -1745,7 +2250,7 @@ function ReviewPaper({
 
       <div className="flex items-center justify-between">
         <span className="font-mono text-xs uppercase tracking-[0.22em] text-ink-soft">
-          Question {grade.question_index + 1} filed.
+          Question {grade.question_index + 1} filed. Next difficulty: {grade.next_difficulty ?? question.difficulty}.
         </span>
         {isLast ? (
           <button className="btn-primary" onClick={onFinish}>
@@ -1758,6 +2263,37 @@ function ReviewPaper({
         )}
       </div>
     </div>
+  )
+}
+
+function KnowledgeMapGrid({
+  entries,
+  title = 'Knowledge map',
+}: {
+  entries: KnowledgeMapEntry[]
+  title?: string
+}) {
+  if (!entries.length) return null
+  return (
+    <section>
+      <div className="field-label">{title}</div>
+      <div className="knowledge-grid mt-4">
+        {entries.map(entry => (
+          <div key={`${entry.topic}-${entry.mastery_level}`} className={'knowledge-cell ' + masteryClass(entry.mastery_level)}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="font-display text-2xl leading-tight">{entry.topic}</div>
+                <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em]">
+                  {entry.mastery_level}
+                </div>
+              </div>
+              <div className="font-display text-4xl leading-none">{entry.average_score}</div>
+            </div>
+            <p className="mt-3 font-serif text-sm leading-relaxed">{entry.summary}</p>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -1856,6 +2392,8 @@ function ExamReport({
         </p>
       </div>
 
+      <KnowledgeMapGrid entries={displayReport.knowledge_map ?? []} />
+
       <div>
         <div className="field-label">Question-by-question</div>
         <div className="mt-4 space-y-4">
@@ -1867,8 +2405,11 @@ function ExamReport({
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="font-mono text-xs tracking-[0.22em] uppercase text-oxblood">
-                    Q{String(i + 1).padStart(2, '0')} · {q.topic}
+                    Q{String(i + 1).padStart(2, '0')} · {q.topic} · {q.difficulty ?? displayReport.difficulty}
                   </div>
+                  {q.source_label && (
+                    <div className="mt-2"><span className="chip">Derived from {q.source_label}</span></div>
+                  )}
                   <div className="mt-2 font-display text-xl md:text-2xl leading-tight">
                     {q.question}
                   </div>
@@ -1915,7 +2456,7 @@ function ExamReport({
                 ))}
               </div>
               <div className="mt-3 font-mono text-xs text-ink-soft">
-                ⏱ {Math.round(q.time_spent_seconds)}s
+                Time {Math.round(q.time_spent_seconds)}s
               </div>
               {q.dispute_result && (
                 <div className="mt-4 bg-ink/5 border border-ink/15 p-4">
@@ -2109,13 +2650,17 @@ function StudentHistoryPage({
 
                   {open && (
                     <div className="mt-6 space-y-4">
+                      <KnowledgeMapGrid entries={session.knowledge_map ?? []} title="Knowledge map from this sitting" />
                       {session.questions.map(question => (
                         <div key={question.question_index} className="border border-ink/15 p-4">
                           <div className="flex flex-wrap items-start justify-between gap-4">
                             <div>
                               <div className="font-mono text-xs uppercase tracking-[0.22em] text-oxblood">
-                                Q{question.question_index + 1} · {question.topic}
+                                Q{question.question_index + 1} · {question.topic} · {question.difficulty ?? session.difficulty}
                               </div>
+                              {question.source_label && (
+                                <div className="mt-2"><span className="chip">Derived from {question.source_label}</span></div>
+                              )}
                               <p className="mt-2 font-serif text-lg leading-relaxed">{question.question}</p>
                             </div>
                             <div className={'font-display text-4xl ' + scoreClass(question.effective_score)}>

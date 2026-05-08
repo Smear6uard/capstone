@@ -32,6 +32,9 @@ export const createForSession = mutation({
       criterion_scores: question.criterion_scores,
       overall_score: question.overall_score,
       grading_explanation: question.grading_explanation,
+      difficulty: question.difficulty,
+      source_chunk_id: question.source_chunk_id ?? null,
+      source_label: question.source_label ?? null,
       created_at: question.created_at ?? nowIso(),
     });
     await ctx.db.patch(session._id, {
