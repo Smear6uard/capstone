@@ -192,6 +192,8 @@ interface StudentHistoryQuestion {
   question_index: number
   topic: string
   question: string
+  student_answer: string
+  time_spent_seconds: number
   overall_score: number
   effective_score: number
   grading_explanation: string
@@ -2443,6 +2445,12 @@ function ExamReport({
                   </div>
                 </div>
               </div>
+              <div className="mt-4 border border-ink/10 bg-ink/[0.03] p-4">
+                <div className="field-label">Student response</div>
+                <p className="mt-2 font-serif leading-relaxed whitespace-pre-line">
+                  {q.student_answer || '—'}
+                </p>
+              </div>
               <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                 {q.criterion_scores.map((c, j) => (
                   <div key={j} className="border border-ink/10 p-2">
@@ -2665,6 +2673,15 @@ function StudentHistoryPage({
                             </div>
                             <div className={'font-display text-4xl ' + scoreClass(question.effective_score)}>
                               {question.effective_score}
+                            </div>
+                          </div>
+                          <div className="mt-4 border border-ink/10 bg-ink/[0.03] p-4">
+                            <div className="field-label">Your response</div>
+                            <p className="mt-2 font-serif text-ink leading-relaxed whitespace-pre-line">
+                              {question.student_answer || '—'}
+                            </p>
+                            <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-ink-soft">
+                              Time on question: {Math.round(question.time_spent_seconds)}s
                             </div>
                           </div>
                           <p className="mt-3 font-serif text-ink-soft leading-relaxed whitespace-pre-line">

@@ -532,6 +532,8 @@ class StudentHistoryQuestion(BaseModel):
     question_index: int
     topic: str
     question: str
+    student_answer: str
+    time_spent_seconds: float
     overall_score: int
     effective_score: int
     grading_explanation: str
@@ -1970,6 +1972,8 @@ async def student_history(
                     question_index=question["question_index"],
                     topic=question["topic"],
                     question=question["question"],
+                    student_answer=question.get("student_answer") or "",
+                    time_spent_seconds=float(question.get("time_spent_seconds") or 0),
                     overall_score=question["overall_score"],
                     effective_score=_effective_question_score(question),
                     grading_explanation=question["grading_explanation"],

@@ -257,6 +257,8 @@ def test_student_login_and_history_tracks_multiple_completed_exams(
         "Roman History",
     ]
     assert payload["sessions"][0]["questions"][0]["effective_score"] == 90
+    assert payload["sessions"][0]["questions"][0]["student_answer"] == "A concise answer."
+    assert payload["sessions"][0]["questions"][0]["time_spent_seconds"] == 60
 
 
 def test_generate_question_rejects_when_exam_full(
